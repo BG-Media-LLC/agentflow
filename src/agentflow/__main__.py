@@ -20,6 +20,7 @@ from .run_kernel import (
     DEFAULT_CLAIM_LEASE_SECONDS,
     abandon_run,
     approve_run,
+    follow_run,
     list_runs,
     read_run_status,
     start_run,
@@ -40,6 +41,9 @@ def main() -> int:
     status_parser = subcommands.add_parser("status")
     status_parser.add_argument("run_id")
     status_parser.add_argument("--data-dir", type=Path)
+    watch_parser = subcommands.add_parser("watch")
+    watch_parser.add_argument("run_id")
+    watch_parser.add_argument("--data-dir", type=Path)
     list_parser = subcommands.add_parser("list")
     list_parser.add_argument("--state")
     list_parser.add_argument("--data-dir", type=Path)
@@ -142,6 +146,13 @@ def main() -> int:
         if result.repository_profile_path is not None:
             response["repository_profile_path"] = result.repository_profile_path
         print(json.dumps(response, sort_keys=True))
+        return 0
+
+    if args.command == "watch":
+        follow_run(
+            run_id=args.run_id,
+            data_dir=agentflow_home(args.data_dir),
+        )
         return 0
 
     if args.command == "list":

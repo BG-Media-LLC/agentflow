@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 from typing import Any, Protocol
 
 from .contracts import contract_schema
@@ -28,7 +29,7 @@ ROLE_INSTRUCTIONS = {
 ROLES = ("planner", "builder", "reviewer")
 
 SUGGESTED_MODELS = {
-    "claude": {"builder": "opus", "planner": "fable", "reviewer": "opus"},
+    "claude": {"builder": "opus", "planner": "opus", "reviewer": "opus"},
 }
 
 
@@ -83,6 +84,7 @@ class AgentAdapter(Protocol):
         role: str,
         request: dict[str, Any],
         workspace: Path,
+        transcript_path: Path | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -99,8 +101,9 @@ class DeterministicFakeAdapter:
         role: str,
         request: dict[str, Any],
         workspace: Path,
+        transcript_path: Path | None = None,
     ) -> dict[str, Any]:
-        del request
+        del request, transcript_path
         role_fixture = self._fixture.get(role)
         if not isinstance(role_fixture, dict):
             raise ValueError(f"fake adapter fixture has no object for role {role}")
@@ -140,7 +143,9 @@ class CodexAdapter:
         role: str,
         request: dict[str, Any],
         workspace: Path,
+        transcript_path: Path | None = None,
     ) -> dict[str, Any]:
+        del transcript_path
         sandbox = "workspace-write" if role == "builder" else "read-only"
         prompt = role_prompt(role, request)
         with tempfile.TemporaryDirectory(prefix="agentflow-codex-") as temp_dir:
@@ -212,6 +217,7 @@ class ClaudeAdapter:
         self._executable = executable or os.environ.get("AGENTFLOW_CLAUDE", "claude")
         self._data_dir = data_dir
         self._model = model
+        self.last_resolved_model: str | None = None
 
     def resolve_model(self, role: str) -> str:
         _validate_role(role)
@@ -235,14 +241,19 @@ class ClaudeAdapter:
         role: str,
         request: dict[str, Any],
         workspace: Path,
+        transcript_path: Path | None = None,
     ) -> dict[str, Any]:
+        # Resolve the model exactly once per invocation so the value passed to
+        # the CLI and the value stamped as event provenance can never diverge.
         model = self.resolve_model(role)
-        completed = subprocess.run(
+        self.last_resolved_model = model
+        process = subprocess.Popen(
             [
                 self._executable,
                 "--print",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--json-schema",
                 json.dumps(contract_schema(role), sort_keys=True),
                 "--no-session-persistence",
@@ -250,24 +261,73 @@ class ClaudeAdapter:
                 "--model",
                 model,
             ],
-            input=role_prompt(role, request),
             cwd=workspace,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            capture_output=True,
-            timeout=3600,
-            check=False,
         )
-        if completed.returncode != 0:
+        # Drain stderr on a separate thread so a full stderr pipe can never
+        # deadlock the stdout streaming loop below.
+        stderr_chunks: list[str] = []
+
+        def _drain_stderr() -> None:
+            assert process.stderr is not None
+            stderr_chunks.append(process.stderr.read())
+
+        stderr_reader = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_reader.start()
+
+        result_event: dict[str, Any] | None = None
+        transcript_file = None
+        try:
+            assert process.stdin is not None
+            process.stdin.write(role_prompt(role, request))
+            process.stdin.close()
+            if transcript_path is not None:
+                transcript_path.parent.mkdir(parents=True, exist_ok=True)
+                transcript_file = transcript_path.open("w", encoding="utf-8")
+            assert process.stdout is not None
+            for line in process.stdout:
+                if transcript_file is not None:
+                    # Append and flush each stream line as it arrives so the
+                    # transcript can be tailed live.
+                    transcript_file.write(line)
+                    transcript_file.flush()
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    event = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "result":
+                    result_event = event
+        finally:
+            if transcript_file is not None:
+                transcript_file.close()
+
+        try:
+            returncode = process.wait(timeout=3600)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise
+        stderr_reader.join()
+        stderr_text = "".join(stderr_chunks)
+        if returncode != 0:
             raise RuntimeError(
-                f"Claude adapter failed for role {role}:\n{completed.stderr}"
+                f"Claude adapter failed for role {role}:\n{stderr_text}"
             )
-        envelope = json.loads(completed.stdout)
-        if envelope.get("is_error") or envelope.get("subtype") != "success":
+        if result_event is None:
+            raise RuntimeError(
+                f"Claude adapter returned no structured output for role {role}"
+            )
+        if result_event.get("is_error") or result_event.get("subtype") != "success":
             raise RuntimeError(
                 f"Claude adapter reported failure for role {role}:\n"
-                f"{envelope.get('result')}"
+                f"{result_event.get('result')}"
             )
-        structured_output = envelope.get("structured_output")
+        structured_output = result_event.get("structured_output")
         if not isinstance(structured_output, dict):
             raise RuntimeError(
                 f"Claude adapter returned no structured output for role {role}"

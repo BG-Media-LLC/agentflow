@@ -154,8 +154,19 @@ Every behavior statement carries one of three classifications:
   the stage's `plan_ready`, `build_ready`, `review_ready`, or
   `review_blocked` event. The fake and Codex adapters route no models and
   record no `model` field.
+- **Implemented.** Live role observability for the Claude adapter: each
+  planner, builder, and reviewer stage streams the provider's output
+  (`stream-json`) to a tailable `runs/<run-id>/<role>-transcript.jsonl`
+  evidence file referenced from the stage event, and the read-only `watch`
+  command follows a Run's events and growing transcript until it reaches a
+  state requiring external action. The fake and Codex adapters produce no
+  transcript. Streaming does not change workflow state, verification rules, or
+  approval authority.
 - **Target.** Capability-based model routing across providers, beyond the
   Claude adapter's recorded per-role routing.
+- **Target.** A durable projection or UI over role transcripts beyond the
+  line-tailing `watch` command — for example, a structured activity view
+  spanning multiple Runs.
 - **Target.** Automatic adapter self-provisioning: Agentflow detecting a
   missing adapter and building, testing, and landing one through its own
   workflow before use. Until this exists, adapters are built through

@@ -14,7 +14,7 @@ from test_advance_command import (
 )
 
 
-SUGGESTED = {"builder": "opus", "planner": "fable", "reviewer": "opus"}
+SUGGESTED = {"builder": "opus", "planner": "opus", "reviewer": "opus"}
 
 PLANNER_STUB_TEMPLATE = """#!/usr/bin/env python3
 import json
@@ -79,6 +79,43 @@ print(json.dumps({{
 """
 
 
+RECORDING_PLANNER_STUB = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+arguments = sys.argv[1:]
+
+
+def value(flag):
+    return arguments[arguments.index(flag) + 1]
+
+
+with Path(os.environ["AGENTFLOW_STUB_MODEL_LOG"]).open(
+    "a", encoding="utf-8"
+) as handle:
+    handle.write(value("--model") + "\\n")
+assert "planner" in sys.stdin.read()
+print(json.dumps({
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "result": "planned",
+    "structured_output": {
+        "files_to_modify": ["README.md"],
+        "risks": [],
+        "steps": [{
+            "description": "Document the health endpoint",
+            "id": "P1",
+            "verification": "The authoritative checks pass"
+        }],
+        "summary": "Add a health endpoint"
+    }
+}))
+"""
+
+
 def base_environment() -> dict[str, str]:
     environment = {
         key: value
@@ -112,7 +149,7 @@ class ModelsCommandTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "fable")
+            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "opus")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
 
@@ -332,7 +369,7 @@ class ModelsCommandTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "fable")
+            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "opus")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
             planned = agentflow(
@@ -367,8 +404,44 @@ class ModelsCommandTests(unittest.TestCase):
             build_ready = next(
                 event for event in events if event["type"] == "build_ready"
             )
-            self.assertEqual(plan_ready["model"], "fable")
+            self.assertEqual(plan_ready["model"], "opus")
             self.assertEqual(build_ready["model"], "opus")
+
+    def test_stage_event_model_matches_the_single_cli_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = base_environment()
+            fake_claude = temp_path / "claude"
+            fake_claude.write_text(RECORDING_PLANNER_STUB, encoding="utf-8")
+            fake_claude.chmod(0o755)
+            model_log = temp_path / "model-argv.log"
+            environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
+            environment["AGENTFLOW_STUB_MODEL_LOG"] = str(model_log)
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            recorded = model_log.read_text(encoding="utf-8").splitlines()
+            # The CLI is the only consumer of the resolved model; it is invoked
+            # exactly once, proving the model is resolved a single time.
+            self.assertEqual(len(recorded), 1, recorded)
+            events = read_events(data_dir, run_id)
+            plan_ready = next(
+                event for event in events if event["type"] == "plan_ready"
+            )
+            # The event's provenance is stamped from that same single
+            # resolution, never re-resolved.
+            self.assertEqual(plan_ready["model"], recorded[0])
 
     def test_fake_adapter_stage_events_record_no_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

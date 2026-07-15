@@ -16,6 +16,7 @@ agentflow run <task.json>
 agentflow advance <run-id> [--adapter claude|codex] [--model <model>] [--claim-lease-seconds <seconds>]
 agentflow models [--adapter claude --set <role>=<model>]
 agentflow status <run-id>
+agentflow watch <run-id>
 agentflow list [--state <state>]
 agentflow approve <run-id> --approved-by <human identity>
 agentflow abandon <run-id> --abandoned-by <identity> [--reason <text>]
@@ -30,15 +31,33 @@ agentflow abandon <run-id> --abandoned-by <identity> [--reason <text>]
   fingerprint at `.agentflow/repository-profile.json`.
 - `advance` selects the next stage from replayed state. Planner, builder, and
   reviewer stages require an adapter. The built-to-verified transition executes
-  profile checks directly without a model.
+  profile checks directly without a model. The Claude adapter invokes the
+  `claude` CLI with `--output-format stream-json --verbose` (partial-message
+  streaming is not requested) while keeping its `--json-schema` structured
+  output, resolves each role's model exactly once per invocation, and appends
+  every received stream line to `runs/<run-id>/<role>-transcript.jsonl` in
+  Agentflow Home as it arrives so the transcript can be tailed live. The final
+  `result` stream event still supplies the schema-validated structured output,
+  with unchanged error semantics for nonzero exit, error subtype, and missing
+  structured output. The fake and Codex adapters produce no transcript.
+- `watch` follows a Run live and read-only: it prints each new line appended to
+  the Run's `events.jsonl` and to whichever `<role>-transcript.jsonl` is
+  growing, projecting Run State each poll, and prints a final status line and
+  exits once the Run reaches a state requiring external action
+  (`awaiting_human`, `changes_requested`, `failed`, `abandoned`, or
+  `human_approved`). It exits promptly when that condition is already true and
+  never creates or modifies any evidence file.
 - `advance --model` pins the model for the single stage that invocation
   performs and is accepted only with `--adapter claude`. The Claude adapter
   resolves each role's model in precedence order — explicit `--model`, then
   the `AGENTFLOW_CLAUDE_PLANNER_MODEL`, `AGENTFLOW_CLAUDE_BUILDER_MODEL`, or
   `AGENTFLOW_CLAUDE_REVIEWER_MODEL` environment variable, then the routing
   recorded in `models.json` in Agentflow Home, then the adapter's suggested
-  defaults (`fable` for the planner, `opus` for the builder and reviewer) —
-  and passes the resolved model to the `claude` CLI as `--model`.
+  defaults (`opus` for every role; `fable` is reserved for the orchestrating
+  session, not the role adapters) — and passes the resolved model to the
+  `claude` CLI as `--model`. The model is resolved exactly once per invocation
+  and that single value is both passed to the CLI and stamped as the stage
+  event's `model` provenance; the workflow never re-resolves it.
 - `models` honors `--data-dir` and, with no arguments, prints a sorted JSON
   object mapping each model-routing adapter (currently `claude`) to its
   `recorded` routing from `models.json` (an empty object when nothing is
@@ -90,6 +109,7 @@ an override so they cannot contaminate a developer's real runs.
 │       ├── build-report.json
 │       ├── checks.json
 │       ├── review.json
+│       ├── <role>-transcript.jsonl
 │       └── events.jsonl
 └── worktrees/
     └── <run-id>/
@@ -116,9 +136,12 @@ New events contain a one-based `sequence` equal to their line number in
 
 `plan_ready`, `build_ready`, `review_ready`, and `review_blocked` carry a
 `model` field naming the resolved model whenever the invoking adapter routes
-models (currently the Claude adapter); the deterministic fake adapter records
-no `model` field. The field is provenance only — state projection is
-unchanged.
+models (currently the Claude adapter); the deterministic fake and Codex
+adapters record no `model` field. The same four events also carry a
+`transcript` field naming the `<role>-transcript.jsonl` evidence file whenever
+the invoking adapter produced one (currently only the Claude adapter); the fake
+and Codex adapters produce no transcript and therefore no `transcript` field.
+Both fields are provenance only — state projection is unchanged.
 `repository_snapshotted`, `repository_profile_captured`, `claim_acquired`,
 `claim_released`, and `claim_expired` add evidence without changing state.
 `review_ready` is immediately followed by `awaiting_human` in the current

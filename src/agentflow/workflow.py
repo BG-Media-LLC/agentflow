@@ -37,11 +37,20 @@ def _git(*args: str, cwd: Path) -> str:
     ).stdout.rstrip("\n")
 
 
-def _model_provenance(adapter: AgentAdapter, role: str) -> dict[str, str]:
-    resolve = getattr(adapter, "resolve_model", None)
-    if resolve is None:
+def _model_provenance(adapter: AgentAdapter) -> dict[str, str]:
+    # Read the single value the adapter resolved during invoke; never
+    # re-resolve here, so the CLI argument and the event provenance cannot
+    # diverge. Adapters that route no models leave this unset.
+    model = getattr(adapter, "last_resolved_model", None)
+    if model is None:
         return {}
-    return {"model": resolve(role)}
+    return {"model": model}
+
+
+def _transcript_field(transcript_path: Path) -> dict[str, str]:
+    if transcript_path.exists():
+        return {"transcript": str(transcript_path)}
+    return {}
 
 
 def _changed_files(workspace: Path) -> list[str]:
@@ -109,11 +118,13 @@ def _advance_claimed_run(
     if status.state == "ready":
         if adapter is None:
             raise ValueError("the planner stage requires an Agent Adapter")
+        transcript_path = run_dir / "planner-transcript.jsonl"
         plan = validate_plan(
             adapter.invoke(
                 role="planner",
                 request={"profile": profile, "task": task},
                 workspace=workspace,
+                transcript_path=transcript_path,
             )
         )
         artifact = run_dir / "plan.json"
@@ -127,7 +138,8 @@ def _advance_claimed_run(
             event_type="plan_ready",
             adapter=adapter.name,
             artifact=str(artifact),
-            **_model_provenance(adapter, "planner"),
+            **_transcript_field(transcript_path),
+            **_model_provenance(adapter),
         )
         return AdvancedRun(run_id=run_id, state="planned", artifact=artifact)
 
@@ -230,6 +242,7 @@ def _advance_claimed_run(
         )
         if before_head != candidate_sha or before_status:
             raise ValueError("verified Workspace is not clean at the candidate SHA")
+        transcript_path = run_dir / "reviewer-transcript.jsonl"
         review = validate_review(
             adapter.invoke(
                 role="reviewer",
@@ -245,6 +258,7 @@ def _advance_claimed_run(
                     "task": task,
                 },
                 workspace=workspace,
+                transcript_path=transcript_path,
             )
         )
         after_head = _git("rev-parse", "HEAD", cwd=workspace)
@@ -269,7 +283,8 @@ def _advance_claimed_run(
                 adapter=adapter.name,
                 artifact=str(artifact),
                 candidate_sha=candidate_sha,
-                **_model_provenance(adapter, "reviewer"),
+                **_transcript_field(transcript_path),
+                **_model_provenance(adapter),
             )
             return AdvancedRun(
                 run_id=run_id,
@@ -284,7 +299,8 @@ def _advance_claimed_run(
             adapter=adapter.name,
             artifact=str(artifact),
             candidate_sha=candidate_sha,
-            **_model_provenance(adapter, "reviewer"),
+            **_transcript_field(transcript_path),
+            **_model_provenance(adapter),
         )
         append_event(
             data_dir=data_dir,
@@ -304,11 +320,13 @@ def _advance_claimed_run(
     plan = validate_plan(
         json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     )
+    transcript_path = run_dir / "builder-transcript.jsonl"
     report = validate_builder_report(
         adapter.invoke(
             role="builder",
             request={"plan": plan, "profile": profile, "task": task},
             workspace=workspace,
+            transcript_path=transcript_path,
         )
     )
     changed_files = _changed_files(workspace)
@@ -336,7 +354,8 @@ def _advance_claimed_run(
         adapter=adapter.name,
         artifact=str(artifact),
         candidate_sha=candidate_sha,
-        **_model_provenance(adapter, "builder"),
+        **_transcript_field(transcript_path),
+        **_model_provenance(adapter),
     )
     return AdvancedRun(
         run_id=run_id,

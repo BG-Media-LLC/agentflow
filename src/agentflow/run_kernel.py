@@ -8,9 +8,24 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
+import time
+from typing import Callable, TextIO
 import uuid
 
 from .repository_profile import inspect_repository_profile
+
+# Run states that require external action; `follow_run` prints a final status
+# line and returns once the Run reaches one of them.
+FOLLOW_TERMINAL_STATES = frozenset(
+    {
+        "awaiting_human",
+        "changes_requested",
+        "failed",
+        "abandoned",
+        "human_approved",
+    }
+)
 
 # Must strictly exceed the 3600-second adapter subprocess timeout in
 # agent_adapter.py so a live stage cannot lose its claim while its adapter
@@ -203,6 +218,66 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
         candidate_sha=candidate_sha,
         approved_sha=approved_sha,
     )
+
+
+def _emit_new_lines(path: Path, offset: int, out: TextIO) -> int:
+    """Print any complete lines appended to ``path`` past ``offset``.
+
+    Tracks a byte offset and only emits up to the final newline so a
+    concurrently-growing file never yields a partial line. Read-only.
+    """
+    if not path.exists():
+        return offset
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read()
+    if not data:
+        return offset
+    last_newline = data.rfind(b"\n")
+    if last_newline == -1:
+        return offset
+    complete = data[: last_newline + 1]
+    out.write(complete.decode("utf-8"))
+    out.flush()
+    return offset + len(complete)
+
+
+def follow_run(
+    *,
+    run_id: str,
+    data_dir: Path,
+    out: TextIO | None = None,
+    poll_interval: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Tail a Run's events and live role transcript until it needs a human.
+
+    Prints each new line appended to ``events.jsonl`` and to whichever
+    ``<role>-transcript.jsonl`` is growing, projecting Run State each poll, and
+    returns after printing a final status line once the Run reaches a state
+    requiring external action. Exits immediately when that is already true.
+    This function is strictly read-only: it never creates or modifies evidence.
+    """
+    if out is None:
+        out = sys.stdout
+    run_dir = data_dir / "runs" / run_id
+    events_path = run_dir / "events.jsonl"
+    events_offset = 0
+    transcript_offsets: dict[Path, int] = {}
+    while True:
+        events_offset = _emit_new_lines(events_path, events_offset, out)
+        for transcript_path in sorted(run_dir.glob("*-transcript.jsonl")):
+            transcript_offsets[transcript_path] = _emit_new_lines(
+                transcript_path,
+                transcript_offsets.get(transcript_path, 0),
+                out,
+            )
+        state = read_run_status(run_id=run_id, data_dir=data_dir).state
+        if state in FOLLOW_TERMINAL_STATES:
+            out.write(f"run {run_id} {state}\n")
+            out.flush()
+            return state
+        sleep(poll_interval)
 
 
 def list_runs(*, data_dir: Path, state: str | None = None) -> list[RunStatus]:

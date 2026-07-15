@@ -694,11 +694,14 @@ def value(flag):
 
 
 assert "--print" in arguments
-assert value("--output-format") == "json"
+assert value("--output-format") == "stream-json"
+assert "--include-partial-messages" not in arguments
 assert value("--tools") == "Read,Grep,Glob"
 assert value("--permission-mode") == "dontAsk"
 assert "planner" in sys.stdin.read()
 json.loads(value("--json-schema"))
+print(json.dumps({"type": "system", "subtype": "init"}))
+print(json.dumps({"type": "assistant", "message": {"content": "planning"}}))
 print(json.dumps({
     "type": "result",
     "subtype": "success",
@@ -798,12 +801,16 @@ def value(flag):
     return arguments[arguments.index(flag) + 1]
 
 
+assert value("--output-format") == "stream-json"
+assert "--include-partial-messages" not in arguments
 assert value("--permission-mode") == "acceptEdits"
 assert value("--allowedTools") == "Bash"
 assert "builder" in sys.stdin.read()
 Path("README.md").write_text(
     "# Target\\n\\nHealth endpoint documented.\\n", encoding="utf-8"
 )
+print(json.dumps({"type": "system", "subtype": "init"}))
+print(json.dumps({"type": "assistant", "message": {"content": "building"}}))
 print(json.dumps({
     "type": "result",
     "subtype": "success",
@@ -852,6 +859,7 @@ print(json.dumps({
                 """#!/usr/bin/env python3
 import json
 
+print(json.dumps({"type": "system", "subtype": "init"}))
 print(json.dumps({
     "type": "result",
     "subtype": "error_during_execution",
