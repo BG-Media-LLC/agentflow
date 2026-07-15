@@ -19,6 +19,7 @@ agentflow status <run-id>
 agentflow watch <run-id>
 agentflow list [--state <state>]
 agentflow approve <run-id> --approved-by <human identity>
+agentflow reject <run-id> --rejected-by <human identity> [--reason <text>]
 agentflow abandon <run-id> --abandoned-by <identity> [--reason <text>]
 agentflow rebase <run-id>
 ```
@@ -55,9 +56,10 @@ agentflow rebase <run-id>
   the Run's `events.jsonl` and to whichever `<role>-transcript.jsonl` is
   growing, projecting Run State each poll, and prints a final status line and
   exits once the Run reaches a state requiring external action
-  (`awaiting_human`, `changes_requested`, `failed`, `abandoned`, or
-  `human_approved`). It exits promptly when that condition is already true and
-  never creates or modifies any evidence file.
+  (`awaiting_human`, `changes_requested`, `failed`, `abandoned`,
+  `human_approved`, `plan_rejected`, or `human_rejected`). It exits promptly
+  when that condition is already true and never creates or modifies any
+  evidence file.
 - `advance --model` pins the model for the single stage that invocation
   performs and is accepted with `--adapter claude` or `--adapter cursor`.
   Each routing adapter resolves a role's model in precedence order — explicit
@@ -67,6 +69,16 @@ agentflow rebase <run-id>
   `claude-opus-4-8-thinking-high` for every role. The resolved model is passed
   to the provider CLI and stamped on the stage event from that same single
   resolution; the workflow never re-resolves it.
+- From `changes_requested`, `advance` performs bounded repair: while fewer than
+  `MAX_REPAIR_ATTEMPTS` (2) `repair_ready` events exist, it invokes the builder
+  with the original plan, latest review, current candidate, and one-based
+  repair attempt, requires a clean Workspace at that candidate, enforces the
+  same planned-path and report checks as the initial build, commits a new
+  candidate, appends `repair_ready`, and re-enters `built` so checks and review
+  rerun. After two repairs, the next repair attempt appends `repair_exhausted`
+  and becomes `failed` without invoking a model. Build, check, review, and
+  repair reports and transcripts are attempt-scoped so earlier evidence is
+  never overwritten; legacy flat artifact paths remain replayable.
 - `models` honors `--data-dir` and, with no arguments, prints a sorted JSON
   object mapping each model-routing adapter (`claude` and `cursor`) to its
   `recorded` routing from `models.json` (an empty object when nothing is
@@ -89,11 +101,16 @@ agentflow rebase <run-id>
   empty array.
 - `approve` appends an explicit approval only when replayed state is
   `awaiting_human`. Conversation text is not approval evidence.
+- `reject` acquires the Run's stage claim and appends a terminal rejection:
+  from `planned`, `plan_rejected`; from `awaiting_human`, `human_rejected`
+  bound to the candidate SHA. It requires `--rejected-by` and accepts optional
+  `--reason`. Conversation text is never rejection evidence. Rejected Runs
+  cannot advance, approve, abandon, rebase, or be rejected again.
 - `abandon` acquires the Run's stage claim before appending the terminal
   `run_abandoned` event, so a Run actively claimed by a live process cannot be
   abandoned out from under it. The event records the required `--abandoned-by`
-  identity and the optional `--reason`. Abandoning an already-abandoned or
-  `human_approved` Run fails.
+  identity and the optional `--reason`. Abandoning an already-abandoned,
+  `human_approved`, `plan_rejected`, or `human_rejected` Run fails.
 - `rebase` refreshes a committed candidate onto the Target Repository's current
   main head so a Run whose base has fallen behind can be mechanically refreshed
   instead of abandoned. It first performs a read-only up-to-date check *before*
@@ -140,10 +157,11 @@ an override so they cannot contaminate a developer's real runs.
 │       ├── repository.json
 │       ├── profile.json
 │       ├── plan.json
-│       ├── build-report.json
-│       ├── checks.json
-│       ├── review.json
-│       ├── <role>-transcript.jsonl
+│       ├── build-report-<n>.json
+│       ├── checks-<n>.json
+│       ├── review-<n>.json
+│       ├── repair-report-<n>.json
+│       ├── <role>[-<n>]-transcript.jsonl
 │       └── events.jsonl
 └── worktrees/
     └── <run-id>/
@@ -160,30 +178,35 @@ New events contain a one-based `sequence` equal to their line number in
 | `workspace_ready` | `ready` |
 | `plan_ready` | `planned` |
 | `build_ready` | `built` |
+| `repair_ready` | `built` |
 | `candidate_rebased` | `built` |
 | `checks_passed` | `verified` |
 | `checks_failed` | `failed` |
+| `repair_exhausted` | `failed` |
 | `review_blocked` | `changes_requested` |
 | `review_ready` | `reviewed` |
 | `awaiting_human` | `awaiting_human` |
 | `human_approved` | `human_approved` |
+| `plan_rejected` | `plan_rejected` |
+| `human_rejected` | `human_rejected` |
 | `run_abandoned` | `abandoned` |
 
-`plan_ready`, `build_ready`, `review_ready`, and `review_blocked` carry a
-`model` field naming the resolved model whenever the invoking adapter routes
-models (currently the Claude and Cursor adapters); the deterministic fake and
-Codex adapters record no `model` field. The same four events also carry a
-`transcript` field naming the `<role>-transcript.jsonl` evidence file whenever
-the invoking adapter produced one (currently the Claude and Cursor adapters);
-the fake and Codex adapters produce no transcript and therefore no `transcript`
+`plan_ready`, `build_ready`, `repair_ready`, `review_ready`, and `review_blocked`
+carry a `model` field naming the resolved model whenever the invoking adapter
+routes models (currently the Claude and Cursor adapters); the deterministic fake
+and Codex adapters record no `model` field. The same events also carry a
+`transcript` field naming the role transcript evidence file whenever the
+invoking adapter produced one (currently the Claude and Cursor adapters); the
+fake and Codex adapters produce no transcript and therefore no `transcript`
 field.
 Both fields are provenance only — state projection is unchanged.
 `repository_snapshotted`, `repository_profile_captured`, `claim_acquired`,
 `claim_released`, and `claim_expired` add evidence without changing state.
 `review_ready` is immediately followed by `awaiting_human` in the current
-workflow. `abandoned` is terminal: a Run can never advance and can never be
-approved from it. Legacy events without sequence numbers remain readable, but
-any sequence number that is present must match its line position.
+workflow. `abandoned`, `plan_rejected`, and `human_rejected` are terminal: a
+Run can never advance and can never be approved from them. Legacy events
+without sequence numbers remain readable, but any sequence number that is
+present must match its line position.
 The Repository Profile path reported by `status` is replayed from
 `repository_profile_captured`, rather than rediscovered from the current Target
 Repository.
@@ -192,8 +215,14 @@ and `new_candidate_sha`; it projects state `built`. When it is present, `status`
 and `list` replay the latest rebased base (`new_base_sha`) as `base_sha` and the
 rebased candidate (`new_candidate_sha`) as `candidate_sha`; runs without a rebase
 event keep the `base_sha` recorded in `repository.json`. The checks stage
-resolves its candidate SHA from the newest of `build_ready` and
-`candidate_rebased`, so checks re-run against the rebased candidate.
+resolves its candidate SHA from the newest of `build_ready`, `repair_ready`, and
+`candidate_rebased`, so checks re-run against the latest candidate. Attempt
+numbers for build, check, review, and transcript artifacts advance for every
+new candidate generation — `build_ready`, `repair_ready`, and
+`candidate_rebased` alike — so post-rebase checks and reviews never overwrite
+pre-rebase evidence. Legacy flat names (`plan.json`, `checks.json`,
+`review.json`, `build-report.json`) remain readable when an event's `artifact`
+field points at them.
 
 ## Stage claims
 
@@ -262,6 +291,11 @@ the only claim authority: no lock file or second store of claim state exists.
   release it, on completion or failure alike.
 - Approval requires an explicit command, identity, clean Workspace, and exact
   candidate SHA.
+- Rejection requires an explicit command and identity; conversation text is
+  never rejection evidence. `plan_rejected` and `human_rejected` are terminal.
+- A candidate may be repaired from `changes_requested` at most
+  `MAX_REPAIR_ATTEMPTS` times; each repair commits a new candidate, preserves
+  prior attempt artifacts, and re-enters `built` for checks and review.
 - A candidate may be rebased onto the Target Repository's advanced main only
   from a state with a committed candidate, only inside the Workspace, and never
   against the Target Repository's primary checkout; an up-to-date Run appends no
@@ -285,7 +319,9 @@ the only claim authority: no lock file or second store of claim state exists.
   mode for planner and reviewer, requests the CLI sandbox for the builder, and
   relies on prompt-plus-local-validation with a two-attempt bound for output
   contracts.
-- No tester, bounded builder-fix loop, merger, or deployment adapter exists.
+- No tester, merger, or deployment adapter exists. Bounded repair from
+  `changes_requested` is implemented; a separate tester role and builder-test
+  retry loop are not.
 - Worktree and Workspace cleanup is not implemented: `abandon` records the
   terminal state but leaves the Run's Workspace and branch on disk.
 - `advance` performs one stage per invocation; explicit plan approval and

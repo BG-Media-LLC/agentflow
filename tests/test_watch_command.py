@@ -203,7 +203,7 @@ class WatchCommandTests(unittest.TestCase):
 
             self.assertEqual(built.returncode, 0, built.stderr)
             self.assertEqual(json.loads(built.stdout)["state"], "built")
-            builder_transcript = run_dir / "builder-transcript.jsonl"
+            builder_transcript = run_dir / "builder-1-transcript.jsonl"
             self.assertTrue(builder_transcript.is_file())
             self.assertIn(
                 "editing the README",
@@ -240,7 +240,7 @@ class WatchCommandTests(unittest.TestCase):
             )
             self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
             self.assertEqual(json.loads(reviewed.stdout)["state"], "awaiting_human")
-            reviewer_transcript = run_dir / "reviewer-transcript.jsonl"
+            reviewer_transcript = run_dir / "reviewer-1-transcript.jsonl"
             self.assertTrue(reviewer_transcript.is_file())
 
             watched = agentflow(

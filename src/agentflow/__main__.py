@@ -25,6 +25,7 @@ from .run_kernel import (
     list_runs,
     read_run_status,
     rebase_run,
+    reject_run,
     start_run,
 )
 from .workflow import advance_run
@@ -54,6 +55,11 @@ def main() -> int:
     abandon_parser.add_argument("--abandoned-by", required=True)
     abandon_parser.add_argument("--reason")
     abandon_parser.add_argument("--data-dir", type=Path)
+    reject_parser = subcommands.add_parser("reject")
+    reject_parser.add_argument("run_id")
+    reject_parser.add_argument("--rejected-by", required=True)
+    reject_parser.add_argument("--reason")
+    reject_parser.add_argument("--data-dir", type=Path)
     approve_parser = subcommands.add_parser("approve")
     approve_parser.add_argument("run_id")
     approve_parser.add_argument("--approved-by", required=True)
@@ -198,6 +204,25 @@ def main() -> int:
         }
         if result.reason is not None:
             response["reason"] = result.reason
+        print(json.dumps(response, sort_keys=True))
+        return 0
+
+    if args.command == "reject":
+        result = reject_run(
+            run_id=args.run_id,
+            rejected_by=args.rejected_by,
+            reason=args.reason,
+            data_dir=agentflow_home(args.data_dir),
+        )
+        response = {
+            "rejected_by": result.rejected_by,
+            "run_id": result.run_id,
+            "state": result.state,
+        }
+        if result.reason is not None:
+            response["reason"] = result.reason
+        if result.rejected_sha is not None:
+            response["rejected_sha"] = result.rejected_sha
         print(json.dumps(response, sort_keys=True))
         return 0
 

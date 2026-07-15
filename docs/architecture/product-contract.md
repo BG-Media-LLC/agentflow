@@ -57,12 +57,25 @@ Every behavior statement carries one of three classifications:
   checkout, pushes, or merges. Approval invalidation on rebase is inherent:
   approval binds to the exact candidate SHA, and a rebase produces a new SHA
   that must pass checks, review, and the `awaiting_human` gate again.
+- **Implemented.** Bounded repair out of `changes_requested`: while fewer than
+  `MAX_REPAIR_ATTEMPTS` (2) `repair_ready` events exist, `advance` invokes the
+  builder with the original plan, latest review, current candidate, and
+  one-based repair attempt; commits a new candidate; appends `repair_ready`;
+  and re-enters `built` so checks and review rerun. After two repairs, the next
+  repair attempt appends terminal `repair_exhausted` without invoking a model.
+  Each build, check, review, and repair writes a distinct attempt-scoped
+  artifact so earlier evidence is never overwritten. Attempt numbering also
+  advances on `candidate_rebased`, so checks and reviews after a rebase cannot
+  overwrite pre-rebase artifacts.
+- **Implemented.** Explicit rejection: claim-guarded `reject` with required
+  `--rejected-by` and optional `--reason`. From `planned` it appends terminal
+  `plan_rejected`; from `awaiting_human` it appends terminal `human_rejected`
+  bound to the candidate SHA. Rejection conversation text is never evidence.
+  Rejected Runs cannot advance, approve, abandon, rebase, or be rejected again.
 - **Target.** Explicit plan approval, a tester role, bounded builder-fix retry
   loops, a constrained Merge Agent, and Post-Merge Verification. Merge and
   deployment remain manual after approval until these exist.
-- **Target.** Bounded repair transitions out of `changes_requested`, explicit
-  plan and human rejection transitions, reconciliation, and Workspace cleanup
-  after abandonment.
+- **Target.** Reconciliation and Workspace cleanup after abandonment.
 
 ## Evidence
 
@@ -173,8 +186,8 @@ Every behavior statement carries one of three classifications:
   `advance --model`, then the adapter's `AGENTFLOW_<ADAPTER>_<ROLE>_MODEL`
   environment variable, then recorded routing, then suggested defaults. The
   resolved model is recorded on the stage's `plan_ready`, `build_ready`,
-  `review_ready`, or `review_blocked` event. The fake and Codex adapters route
-  no models and record no `model` field.
+  `repair_ready`, `review_ready`, or `review_blocked` event. The fake and Codex
+  adapters route no models and record no `model` field.
 - **Implemented.** Live role observability for the Claude and Cursor adapters:
   each planner, builder, and reviewer stage streams the provider's output
   (`stream-json`) to a tailable `runs/<run-id>/<role>-transcript.jsonl`

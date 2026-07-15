@@ -291,6 +291,72 @@ print(json.dumps({
             )
             self.assertEqual(json.loads(status.stdout)["state"], "ready")
 
+    def test_cursor_adapter_preserves_stderr_on_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_cursor = temp_path / "agent"
+            write_stub(
+                fake_cursor,
+                """#!/usr/bin/env python3
+import sys
+
+print("cursor stderr detail", file=sys.stderr)
+raise SystemExit(3)
+""",
+            )
+            environment = base_environment()
+            environment["AGENTFLOW_CURSOR"] = str(fake_cursor)
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "cursor",
+                "--model",
+                "cursor-test-model",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("exit 3", planned.stderr)
+            self.assertIn("cursor stderr detail", planned.stderr)
+
+    def test_cursor_adapter_reports_missing_result_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_cursor = temp_path / "agent"
+            write_stub(
+                fake_cursor,
+                """#!/usr/bin/env python3
+import json
+
+print(json.dumps({"type": "system", "subtype": "init"}))
+""",
+            )
+            environment = base_environment()
+            environment["AGENTFLOW_CURSOR"] = str(fake_cursor)
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "cursor",
+                "--model",
+                "cursor-test-model",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("no result event", planned.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

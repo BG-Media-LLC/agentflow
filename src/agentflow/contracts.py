@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
 class ContractError(ValueError):
     pass
+
+
+MIN_PLAN_TEXT_LENGTH = 20
 
 
 def contract_schema(role: str) -> dict[str, Any]:
@@ -15,6 +18,7 @@ def contract_schema(role: str) -> dict[str, Any]:
             "properties": {
                 "files_to_modify": {
                     "items": {"type": "string"},
+                    "minItems": 1,
                     "type": "array",
                 },
                 "risks": {"items": {"type": "string"}, "type": "array"},
@@ -83,6 +87,13 @@ def contract_schema(role: str) -> dict[str, Any]:
     raise ValueError(f"no output contract for role {role}")
 
 
+def _require_plan_substance(label: str, text: str) -> None:
+    if len(text.strip()) < MIN_PLAN_TEXT_LENGTH:
+        raise ContractError(
+            f"plan {label} must contain at least {MIN_PLAN_TEXT_LENGTH} characters"
+        )
+
+
 def validate_plan(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ContractError("plan must be an object")
@@ -91,7 +102,10 @@ def validate_plan(value: Any) -> dict[str, Any]:
         raise ContractError(f"plan fields must be exactly {sorted(required)}")
     if not isinstance(value["summary"], str) or not value["summary"].strip():
         raise ContractError("plan summary must be a non-empty string")
-    if not isinstance(value["files_to_modify"], list) or not all(
+    _require_plan_substance("summary", value["summary"])
+    if not isinstance(value["files_to_modify"], list) or not value["files_to_modify"]:
+        raise ContractError("plan files_to_modify must be a non-empty list of paths")
+    if not all(
         isinstance(path, str) and path for path in value["files_to_modify"]
     ):
         raise ContractError("plan files_to_modify must be a list of paths")
@@ -120,7 +134,43 @@ def validate_plan(value: Any) -> dict[str, Any]:
             )
         if not all(isinstance(step[field], str) and step[field] for field in step):
             raise ContractError("plan step fields must be non-empty strings")
+        _require_plan_substance("step description", step["description"])
+        _require_plan_substance("step verification", step["verification"])
     return value
+
+
+def validate_planned_paths(*, plan: dict[str, Any], workspace: Path) -> None:
+    """Reject planned paths that are not creatable or editable in the Workspace.
+
+    Call only from workflow code that has a Workspace. Adapter-local
+    ``validate_plan`` intentionally skips filesystem checks so providers can
+    validate shape without a checkout.
+    """
+    workspace = workspace.resolve()
+    for path in plan["files_to_modify"]:
+        planned_path = PurePosixPath(path)
+        if planned_path.is_absolute() or ".." in planned_path.parts:
+            raise ContractError(
+                "plan files_to_modify paths must stay within the Workspace"
+            )
+        target = (workspace / path).resolve()
+        try:
+            target.relative_to(workspace)
+        except ValueError as error:
+            raise ContractError(
+                "plan files_to_modify paths must stay within the Workspace"
+            ) from error
+        if target.exists():
+            if not target.is_file():
+                raise ContractError(
+                    f"plan files_to_modify path is not a regular file: {path}"
+                )
+            continue
+        parent = target.parent
+        if not parent.is_dir():
+            raise ContractError(
+                f"plan files_to_modify parent directory does not exist: {path}"
+            )
 
 
 def validate_builder_report(value: Any) -> dict[str, Any]:

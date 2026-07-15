@@ -24,6 +24,18 @@ FOLLOW_TERMINAL_STATES = frozenset(
         "failed",
         "abandoned",
         "human_approved",
+        "plan_rejected",
+        "human_rejected",
+    }
+)
+
+# Terminal rejection and approval states that must not be abandoned or mutated.
+TERMINAL_IMMUTABLE_STATES = frozenset(
+    {
+        "abandoned",
+        "human_approved",
+        "plan_rejected",
+        "human_rejected",
     }
 )
 
@@ -67,6 +79,15 @@ class Abandonment:
     state: str
     abandoned_by: str
     reason: str | None
+
+
+@dataclass(frozen=True)
+class Rejection:
+    run_id: str
+    state: str
+    rejected_by: str
+    reason: str | None
+    rejected_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,14 +204,18 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
         "workspace_ready": "ready",
         "plan_ready": "planned",
         "build_ready": "built",
+        "repair_ready": "built",
         "candidate_rebased": "built",
         "checks_passed": "verified",
         "checks_failed": "failed",
+        "repair_exhausted": "failed",
         "review_ready": "reviewed",
         "review_blocked": "changes_requested",
         "awaiting_human": "awaiting_human",
         "human_approved": "human_approved",
         "run_abandoned": "abandoned",
+        "plan_rejected": "plan_rejected",
+        "human_rejected": "human_rejected",
     }
     for line_number, line in enumerate(
         (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines(),
@@ -362,7 +387,7 @@ def abandon_run(
     acquire_claim(data_dir=data_dir, run_id=run_id, holder=holder)
     try:
         status = read_run_status(run_id=run_id, data_dir=data_dir)
-        if status.state in ("abandoned", "human_approved"):
+        if status.state in TERMINAL_IMMUTABLE_STATES:
             raise ValueError(
                 f"run {run_id} cannot be abandoned from state {status.state}"
             )
@@ -385,10 +410,78 @@ def abandon_run(
         release_claim(data_dir=data_dir, run_id=run_id, holder=holder)
 
 
+def reject_run(
+    *,
+    run_id: str,
+    rejected_by: str,
+    reason: str | None = None,
+    data_dir: Path,
+) -> Rejection:
+    """Record an explicit plan or human rejection.
+
+    Conversation text is never rejection evidence: only this command appends
+    ``plan_rejected`` or ``human_rejected``. Both states are terminal.
+    """
+    holder = default_claim_holder()
+    acquire_claim(data_dir=data_dir, run_id=run_id, holder=holder)
+    try:
+        status = read_run_status(run_id=run_id, data_dir=data_dir)
+        fields: dict[str, str] = {"rejected_by": rejected_by}
+        if reason is not None:
+            fields["reason"] = reason
+        if status.state == "planned":
+            append_event(
+                data_dir=data_dir,
+                run_id=run_id,
+                event_type="plan_rejected",
+                **fields,
+            )
+            return Rejection(
+                run_id=run_id,
+                state="plan_rejected",
+                rejected_by=rejected_by,
+                reason=reason,
+            )
+        if status.state == "awaiting_human":
+            if status.candidate_sha is None:
+                raise ValueError(f"run {run_id} has no rejectable candidate SHA")
+            append_event(
+                data_dir=data_dir,
+                run_id=run_id,
+                event_type="human_rejected",
+                rejected_sha=status.candidate_sha,
+                **fields,
+            )
+            return Rejection(
+                run_id=run_id,
+                state="human_rejected",
+                rejected_by=rejected_by,
+                reason=reason,
+                rejected_sha=status.candidate_sha,
+            )
+        raise ValueError(f"run {run_id} cannot be rejected from state {status.state}")
+    finally:
+        release_claim(data_dir=data_dir, run_id=run_id, holder=holder)
+
+
 # Replayed states with a committed candidate that a rebase may refresh.
 REBASEABLE_STATES = frozenset(
     {"built", "verified", "changes_requested", "awaiting_human"}
 )
+
+
+def append_event(
+    *,
+    data_dir: Path,
+    run_id: str,
+    event_type: str,
+    **fields: object,
+) -> None:
+    events_path = data_dir / "runs" / run_id / "events.jsonl"
+    sequence = len(events_path.read_text(encoding="utf-8").splitlines()) + 1
+    event = {**fields, "sequence": sequence, "type": event_type}
+    with events_path.open("a", encoding="utf-8") as events_file:
+        events_file.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def rebase_run(*, run_id: str, data_dir: Path) -> RebasedRun:
@@ -409,6 +502,10 @@ def rebase_run(*, run_id: str, data_dir: Path) -> RebasedRun:
         raise ValueError(f"run {run_id} has no recorded Target Repository")
     if status.worktree is None:
         raise ValueError(f"run {run_id} has no Workspace")
+    if status.state in TERMINAL_IMMUTABLE_STATES or status.state == "failed":
+        raise ValueError(
+            f"run {run_id} cannot be rebased from state {status.state}"
+        )
     new_base_sha = _git("rev-parse", "HEAD", cwd=Path(status.repository))
     if status.base_sha == new_base_sha:
         return RebasedRun(
@@ -482,20 +579,6 @@ def rebase_run(*, run_id: str, data_dir: Path) -> RebasedRun:
         )
     finally:
         release_claim(data_dir=data_dir, run_id=run_id, holder=holder)
-
-
-def append_event(
-    *,
-    data_dir: Path,
-    run_id: str,
-    event_type: str,
-    **fields: str,
-) -> None:
-    events_path = data_dir / "runs" / run_id / "events.jsonl"
-    sequence = len(events_path.read_text(encoding="utf-8").splitlines()) + 1
-    event = {**fields, "sequence": sequence, "type": event_type}
-    with events_path.open("a", encoding="utf-8") as events_file:
-        events_file.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def default_claim_holder() -> str:

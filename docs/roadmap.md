@@ -40,7 +40,7 @@ record and verify their outputs.
   approved, and merged as 5c4c2961d57ee1a340402f3d0165b5085da82a8f.
 - Gaps found during the Run feed the next vertical slice.
 
-## Next: kernel claims and run lifecycle operations
+## Completed: kernel claims and run lifecycle operations
 
 - Compare-and-append stage claims in the Run's own event log, with lease
   expiry, so exactly one process can claim and execute a stage.

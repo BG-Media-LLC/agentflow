@@ -8,7 +8,12 @@ from pathlib import Path
 import subprocess
 
 from .agent_adapter import AgentAdapter
-from .contracts import validate_builder_report, validate_plan, validate_review
+from .contracts import (
+    validate_builder_report,
+    validate_plan,
+    validate_planned_paths,
+    validate_review,
+)
 from .run_kernel import (
     DEFAULT_CLAIM_LEASE_SECONDS,
     acquire_claim,
@@ -17,6 +22,10 @@ from .run_kernel import (
     read_run_status,
     release_claim,
 )
+
+# Bounded repairs after the initial build: advance from changes_requested may
+# invoke the builder at most this many times before repair_exhausted.
+MAX_REPAIR_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -64,6 +73,63 @@ def _changed_files(workspace: Path) -> list[str]:
     return sorted(changed)
 
 
+def _read_events(run_dir: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def _latest_candidate_sha(events: list[dict]) -> str:
+    for event in reversed(events):
+        if event["type"] == "candidate_rebased":
+            return event["new_candidate_sha"]
+        if event["type"] in ("build_ready", "repair_ready"):
+            return event["candidate_sha"]
+    raise ValueError("no candidate SHA recorded")
+
+
+def _candidate_generation(events: list[dict]) -> int:
+    """1-based generation for the latest candidate-producing event.
+
+    Every new candidate generation advances the counter: ``build_ready``,
+    ``repair_ready``, and ``candidate_rebased``. Checks and reviews after a
+    rebase therefore write distinct attempt artifacts and never overwrite
+    pre-rebase evidence.
+    """
+    return sum(
+        1
+        for event in events
+        if event["type"] in ("build_ready", "repair_ready", "candidate_rebased")
+    )
+
+
+def _artifact_path(run_dir: Path, event: dict, legacy_name: str) -> Path:
+    artifact = event.get("artifact")
+    if artifact:
+        return Path(artifact)
+    return run_dir / legacy_name
+
+
+def _enforce_builder_report(
+    *,
+    plan: dict,
+    report: dict,
+    workspace: Path,
+) -> list[str]:
+    changed_files = _changed_files(workspace)
+    unexpected = sorted(set(changed_files) - set(plan["files_to_modify"]))
+    if unexpected:
+        raise ValueError(f"builder changed files outside the plan: {unexpected}")
+    if sorted(report["files_changed"]) != changed_files:
+        raise ValueError(
+            "builder report files_changed does not match the authoritative Git diff"
+        )
+    if report["unresolved_issues"]:
+        raise ValueError("builder reported unresolved issues")
+    return changed_files
+
+
 def advance_run(
     *,
     run_id: str,
@@ -95,7 +161,13 @@ def _advance_claimed_run(
     adapter: AgentAdapter | None,
 ) -> AdvancedRun:
     status = read_run_status(run_id=run_id, data_dir=data_dir)
-    if status.state not in {"ready", "planned", "built", "verified"}:
+    if status.state not in {
+        "ready",
+        "planned",
+        "built",
+        "verified",
+        "changes_requested",
+    }:
         raise ValueError(f"run {run_id} cannot advance from state {status.state}")
     if status.worktree is None:
         raise ValueError(f"run {run_id} has no Workspace")
@@ -127,6 +199,7 @@ def _advance_claimed_run(
                 transcript_path=transcript_path,
             )
         )
+        validate_planned_paths(plan=plan, workspace=workspace)
         artifact = run_dir / "plan.json"
         artifact.write_text(
             json.dumps(plan, indent=2, sort_keys=True) + "\n",
@@ -144,19 +217,8 @@ def _advance_claimed_run(
         return AdvancedRun(run_id=run_id, state="planned", artifact=artifact)
 
     if status.state == "built":
-        events = [
-            json.loads(line)
-            for line in (run_dir / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
-        candidate_sha = next(
-            event["new_candidate_sha"]
-            if event["type"] == "candidate_rebased"
-            else event["candidate_sha"]
-            for event in reversed(events)
-            if event["type"] in ("build_ready", "candidate_rebased")
-        )
+        events = _read_events(run_dir)
+        candidate_sha = _latest_candidate_sha(events)
         if _git("rev-parse", "HEAD", cwd=workspace) != candidate_sha:
             raise ValueError("Workspace HEAD no longer matches the candidate SHA")
         if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
@@ -194,7 +256,8 @@ def _advance_claimed_run(
         )
         if not workspace_clean:
             all_passed = False
-        artifact = run_dir / "checks.json"
+        generation = _candidate_generation(events)
+        artifact = run_dir / f"checks-{generation}.json"
         artifact.write_text(
             json.dumps(
                 {
@@ -227,12 +290,7 @@ def _advance_claimed_run(
     if status.state == "verified":
         if adapter is None:
             raise ValueError("the reviewer stage requires an Agent Adapter")
-        events = [
-            json.loads(line)
-            for line in (run_dir / "events.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-        ]
+        events = _read_events(run_dir)
         candidate_sha = next(
             event["candidate_sha"]
             for event in reversed(events)
@@ -244,14 +302,17 @@ def _advance_claimed_run(
         )
         if before_head != candidate_sha or before_status:
             raise ValueError("verified Workspace is not clean at the candidate SHA")
-        transcript_path = run_dir / "reviewer-transcript.jsonl"
+        checks_event = next(
+            event for event in reversed(events) if event["type"] == "checks_passed"
+        )
+        checks_path = _artifact_path(run_dir, checks_event, "checks.json")
+        generation = _candidate_generation(events)
+        transcript_path = run_dir / f"reviewer-{generation}-transcript.jsonl"
         review = validate_review(
             adapter.invoke(
                 role="reviewer",
                 request={
-                    "checks": json.loads(
-                        (run_dir / "checks.json").read_text(encoding="utf-8")
-                    ),
+                    "checks": json.loads(checks_path.read_text(encoding="utf-8")),
                     "plan": json.loads(
                         (run_dir / "plan.json").read_text(encoding="utf-8")
                     ),
@@ -269,7 +330,7 @@ def _advance_claimed_run(
         )
         if after_head != before_head or after_status != before_status:
             raise ValueError("reviewer modified the read-only Workspace")
-        artifact = run_dir / "review.json"
+        artifact = run_dir / f"review-{generation}.json"
         artifact.write_text(
             json.dumps(review, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -317,12 +378,102 @@ def _advance_claimed_run(
             candidate_sha=candidate_sha,
         )
 
+    if status.state == "changes_requested":
+        events = _read_events(run_dir)
+        repair_count = sum(1 for event in events if event["type"] == "repair_ready")
+        if repair_count >= MAX_REPAIR_ATTEMPTS:
+            artifact = run_dir / "repair-exhausted.json"
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "max_repair_attempts": MAX_REPAIR_ATTEMPTS,
+                        "repair_ready_count": repair_count,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            append_event(
+                data_dir=data_dir,
+                run_id=run_id,
+                event_type="repair_exhausted",
+                artifact=str(artifact),
+            )
+            return AdvancedRun(run_id=run_id, state="failed", artifact=artifact)
+        if adapter is None:
+            raise ValueError("the builder stage requires an Agent Adapter")
+        repair_attempt = repair_count + 1
+        candidate_sha = _latest_candidate_sha(events)
+        if _git("rev-parse", "HEAD", cwd=workspace) != candidate_sha:
+            raise ValueError("Workspace HEAD no longer matches the candidate SHA")
+        if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
+            raise ValueError("Workspace is not clean at the candidate SHA")
+        plan = validate_plan(
+            json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+        )
+        review_event = next(
+            event for event in reversed(events) if event["type"] == "review_blocked"
+        )
+        review_path = _artifact_path(run_dir, review_event, "review.json")
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        transcript_path = run_dir / f"builder-repair-{repair_attempt}-transcript.jsonl"
+        report = validate_builder_report(
+            adapter.invoke(
+                role="builder",
+                request={
+                    "plan": plan,
+                    "profile": profile,
+                    "task": task,
+                    "review": review,
+                    "candidate_sha": candidate_sha,
+                    "repair_attempt": repair_attempt,
+                },
+                workspace=workspace,
+                transcript_path=transcript_path,
+            )
+        )
+        _enforce_builder_report(plan=plan, report=report, workspace=workspace)
+        artifact = run_dir / f"repair-report-{repair_attempt}.json"
+        artifact.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _git("add", "--all", cwd=workspace)
+        _git(
+            "commit",
+            "-m",
+            f"Agentflow run {run_id} repair {repair_attempt}",
+            cwd=workspace,
+        )
+        new_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
+        append_event(
+            data_dir=data_dir,
+            run_id=run_id,
+            event_type="repair_ready",
+            adapter=adapter.name,
+            artifact=str(artifact),
+            candidate_sha=new_candidate_sha,
+            repair_attempt=repair_attempt,
+            **_transcript_field(transcript_path),
+            **_model_provenance(adapter),
+        )
+        return AdvancedRun(
+            run_id=run_id,
+            state="built",
+            artifact=artifact,
+            candidate_sha=new_candidate_sha,
+        )
+
     if adapter is None:
         raise ValueError("the builder stage requires an Agent Adapter")
     plan = validate_plan(
         json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     )
-    transcript_path = run_dir / "builder-transcript.jsonl"
+    events = _read_events(run_dir)
+    generation = _candidate_generation(events) + 1
+    transcript_path = run_dir / f"builder-{generation}-transcript.jsonl"
     report = validate_builder_report(
         adapter.invoke(
             role="builder",
@@ -331,17 +482,8 @@ def _advance_claimed_run(
             transcript_path=transcript_path,
         )
     )
-    changed_files = _changed_files(workspace)
-    unexpected = sorted(set(changed_files) - set(plan["files_to_modify"]))
-    if unexpected:
-        raise ValueError(f"builder changed files outside the plan: {unexpected}")
-    if sorted(report["files_changed"]) != changed_files:
-        raise ValueError(
-            "builder report files_changed does not match the authoritative Git diff"
-        )
-    if report["unresolved_issues"]:
-        raise ValueError("builder reported unresolved issues")
-    artifact = run_dir / "build-report.json"
+    _enforce_builder_report(plan=plan, report=report, workspace=workspace)
+    artifact = run_dir / f"build-report-{generation}.json"
     artifact.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

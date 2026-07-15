@@ -95,6 +95,18 @@ def _validate_role_output(role: str, value: Any) -> dict[str, Any]:
     return validators[role](value)
 
 
+def _claude_result_diagnostics(result_event: dict[str, Any]) -> str:
+    """Format available Claude result fields for failure messages."""
+    diagnostics = {
+        key: result_event.get(key)
+        for key in ("subtype", "num_turns", "total_cost_usd")
+        if result_event.get(key) is not None
+    }
+    if not diagnostics:
+        return ""
+    return f" {json.dumps(diagnostics, sort_keys=True)}"
+
+
 def _parse_cursor_output(role: str, raw_output: Any) -> dict[str, Any]:
     if isinstance(raw_output, dict):
         return _validate_role_output(role, raw_output)
@@ -543,8 +555,13 @@ class ClaudeAdapter:
         stderr_reader.join()
         stderr_text = "".join(stderr_chunks)
         if returncode != 0:
+            diagnostics = (
+                _claude_result_diagnostics(result_event)
+                if result_event is not None
+                else ""
+            )
             raise RuntimeError(
-                f"Claude adapter failed for role {role}:\n{stderr_text}"
+                f"Claude adapter failed for role {role}{diagnostics}:\n{stderr_text}"
             )
         if result_event is None:
             raise RuntimeError(
@@ -552,7 +569,8 @@ class ClaudeAdapter:
             )
         if result_event.get("is_error") or result_event.get("subtype") != "success":
             raise RuntimeError(
-                f"Claude adapter reported failure for role {role}:\n"
+                f"Claude adapter reported failure for role {role}"
+                f"{_claude_result_diagnostics(result_event)}:\n"
                 f"{result_event.get('result')}"
             )
         structured_output = result_event.get("structured_output")

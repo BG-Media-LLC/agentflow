@@ -234,7 +234,7 @@ class AdvanceCommandTests(unittest.TestCase):
                                 {
                                     "description": "Document the health endpoint",
                                     "id": "P1",
-                                    "verification": "The checks pass",
+                                    "verification": "The authoritative checks pass",
                                 }
                             ],
                             "summary": "Add a health endpoint",
@@ -494,7 +494,7 @@ class AdvanceCommandTests(unittest.TestCase):
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertEqual(json.loads(status.stdout)["state"], "built")
             report = json.loads(
-                (data_dir / "runs" / run_id / "build-report.json").read_text(
+                (data_dir / "runs" / run_id / "build-report-1.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -520,7 +520,7 @@ class AdvanceCommandTests(unittest.TestCase):
             self.assertEqual(response["state"], "verified")
             self.assertEqual(len(response["candidate_sha"]), 40)
             report = json.loads(
-                (data_dir / "runs" / run_id / "checks.json").read_text(
+                (data_dir / "runs" / run_id / "checks-1.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -564,7 +564,7 @@ class AdvanceCommandTests(unittest.TestCase):
             self.assertEqual(verified.returncode, 0, verified.stderr)
             self.assertEqual(json.loads(verified.stdout)["state"], "failed")
             report = json.loads(
-                (data_dir / "runs" / run_id / "checks.json").read_text(
+                (data_dir / "runs" / run_id / "checks-1.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -612,7 +612,7 @@ class AdvanceCommandTests(unittest.TestCase):
             self.assertEqual(response["state"], "awaiting_human")
             self.assertEqual(len(response["candidate_sha"]), 40)
             review = json.loads(
-                (data_dir / "runs" / run_id / "review.json").read_text(
+                (data_dir / "runs" / run_id / "review-1.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -845,7 +845,7 @@ print(json.dumps({
             self.assertEqual(response["state"], "built")
             self.assertEqual(len(response["candidate_sha"]), 40)
             report = json.loads(
-                (data_dir / "runs" / run_id / "build-report.json").read_text(
+                (data_dir / "runs" / run_id / "build-report-1.json").read_text(
                     encoding="utf-8"
                 )
             )
@@ -864,6 +864,8 @@ print(json.dumps({
     "type": "result",
     "subtype": "error_during_execution",
     "is_error": True,
+    "num_turns": 3,
+    "total_cost_usd": 0.42,
     "result": "the session failed before structured output"
 }))
 """,
@@ -890,6 +892,11 @@ print(json.dumps({
 
             self.assertNotEqual(planned.returncode, 0)
             self.assertIn("Claude adapter reported failure", planned.stderr)
+            self.assertIn("error_during_execution", planned.stderr)
+            self.assertIn("num_turns", planned.stderr)
+            self.assertIn("3", planned.stderr)
+            self.assertIn("total_cost_usd", planned.stderr)
+            self.assertIn("0.42", planned.stderr)
             status = agentflow(
                 "status",
                 run_id,
@@ -900,6 +907,53 @@ print(json.dumps({
             )
             self.assertEqual(json.loads(status.stdout)["state"], "ready")
             self.assertFalse((data_dir / "runs" / run_id / "plan.json").exists())
+
+    def test_claude_adapter_nonzero_exit_includes_result_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_claude = temp_path / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env python3
+import json
+import sys
+
+print(json.dumps({
+    "type": "result",
+    "subtype": "error_during_execution",
+    "num_turns": 2,
+    "total_cost_usd": 1.25,
+    "result": "aborted"
+}))
+print("stderr boom", file=sys.stderr)
+raise SystemExit(7)
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            environment = {
+                **os.environ,
+                "AGENTFLOW_CLAUDE": str(fake_claude),
+                "PYTHONPATH": str(PROJECT_ROOT / "src"),
+            }
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("Claude adapter failed for role planner", planned.stderr)
+            self.assertIn("stderr boom", planned.stderr)
+            self.assertIn("error_during_execution", planned.stderr)
+            self.assertIn('"num_turns": 2', planned.stderr)
+            self.assertIn('"total_cost_usd": 1.25', planned.stderr)
 
     def test_supervised_fake_flow_reaches_exact_candidate_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -960,6 +1014,500 @@ print(json.dumps({
             replayed = json.loads(status.stdout)
             self.assertEqual(replayed["state"], "human_approved")
             self.assertEqual(replayed["approved_sha"], candidate_sha)
+
+    def test_successful_repair_then_recheck_and_rereview(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(temp_path, environment)
+            fixture_path = temp_path / "adapter-fixture.json"
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "reviewer": {
+                            "disposition": "changes_requested",
+                            "findings": [
+                                {
+                                    "file": "README.md",
+                                    "message": "Need clearer health endpoint docs",
+                                    "severity": "major",
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            reviewed = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            self.assertEqual(json.loads(reviewed.stdout)["state"], "changes_requested")
+            first_review = (data_dir / "runs" / run_id / "review-1.json").read_text(
+                encoding="utf-8"
+            )
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "builder": {
+                            "output": {
+                                "commands_run": [],
+                                "files_changed": ["README.md"],
+                                "steps_completed": ["P1"],
+                                "unresolved_issues": [],
+                            },
+                            "writes": {
+                                "README.md": (
+                                    "# Target\n\nHealth endpoint documented clearly.\n"
+                                )
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            repaired = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(repaired.returncode, 0, repaired.stderr)
+            repaired_response = json.loads(repaired.stdout)
+            self.assertEqual(repaired_response["state"], "built")
+            repair_sha = repaired_response["candidate_sha"]
+            self.assertTrue(
+                (data_dir / "runs" / run_id / "repair-report-1.json").is_file()
+            )
+            self.assertEqual(
+                (data_dir / "runs" / run_id / "review-1.json").read_text(
+                    encoding="utf-8"
+                ),
+                first_review,
+            )
+
+            rechecked = agentflow(
+                "advance",
+                run_id,
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(rechecked.returncode, 0, rechecked.stderr)
+            self.assertEqual(json.loads(rechecked.stdout)["state"], "verified")
+            self.assertEqual(json.loads(rechecked.stdout)["candidate_sha"], repair_sha)
+            checks = json.loads(
+                (data_dir / "runs" / run_id / "checks-2.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(checks["candidate_sha"], repair_sha)
+            self.assertTrue((data_dir / "runs" / run_id / "checks-1.json").is_file())
+
+            fixture_path.write_text(
+                json.dumps({"reviewer": {"disposition": "approve", "findings": []}}),
+                encoding="utf-8",
+            )
+            rereviewed = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(rereviewed.returncode, 0, rereviewed.stderr)
+            self.assertEqual(json.loads(rereviewed.stdout)["state"], "awaiting_human")
+            self.assertTrue((data_dir / "runs" / run_id / "review-2.json").is_file())
+
+    def test_repair_exhaustion_after_two_repairs_without_third_model_invoke(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(temp_path, environment)
+            fixture_path = temp_path / "adapter-fixture.json"
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "reviewer": {
+                            "disposition": "changes_requested",
+                            "findings": [
+                                {
+                                    "file": "README.md",
+                                    "message": "Need clearer health endpoint docs",
+                                    "severity": "major",
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                ).returncode,
+                0,
+            )
+
+            for attempt in (1, 2):
+                fixture_path.write_text(
+                    json.dumps(
+                        {
+                            "builder": {
+                                "output": {
+                                    "commands_run": [],
+                                    "files_changed": ["README.md"],
+                                    "steps_completed": ["P1"],
+                                    "unresolved_issues": [],
+                                },
+                                "writes": {
+                                    "README.md": (
+                                        f"# Target\n\nRepair attempt {attempt}.\n"
+                                    )
+                                },
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                repaired = agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                )
+                self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                self.assertEqual(json.loads(repaired.stdout)["state"], "built")
+                self.assertEqual(
+                    agentflow(
+                        "advance",
+                        run_id,
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).returncode,
+                    0,
+                )
+                fixture_path.write_text(
+                    json.dumps(
+                        {
+                            "reviewer": {
+                                "disposition": "changes_requested",
+                                "findings": [
+                                    {
+                                        "file": "README.md",
+                                        "message": (
+                                            f"Still needs work after repair {attempt}"
+                                        ),
+                                        "severity": "major",
+                                    }
+                                ],
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                blocked = agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                )
+                self.assertEqual(blocked.returncode, 0, blocked.stderr)
+                self.assertEqual(
+                    json.loads(blocked.stdout)["state"], "changes_requested"
+                )
+
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "builder": {
+                            "output": {
+                                "commands_run": ["should-not-run"],
+                                "files_changed": ["README.md"],
+                                "steps_completed": ["P1"],
+                                "unresolved_issues": [],
+                            },
+                            "writes": {
+                                "README.md": "# Target\n\nShould not be written.\n"
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            worktree = Path(
+                json.loads(
+                    agentflow(
+                        "status",
+                        run_id,
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).stdout
+                )["worktree"]
+            )
+            before_readme = (worktree / "README.md").read_text(encoding="utf-8")
+            exhausted = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(exhausted.returncode, 0, exhausted.stderr)
+            self.assertEqual(json.loads(exhausted.stdout)["state"], "failed")
+            events = [
+                json.loads(line)
+                for line in (data_dir / "runs" / run_id / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                sum(1 for event in events if event["type"] == "repair_ready"), 2
+            )
+            self.assertTrue(
+                any(event["type"] == "repair_exhausted" for event in events)
+            )
+            self.assertFalse(
+                (data_dir / "runs" / run_id / "repair-report-3.json").exists()
+            )
+            self.assertEqual(
+                (worktree / "README.md").read_text(encoding="utf-8"), before_readme
+            )
+            self.assertNotIn("Should not be written", before_readme)
+
+    def test_attempt_artifacts_are_immutable_across_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(temp_path, environment)
+            fixture_path = temp_path / "adapter-fixture.json"
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "reviewer": {
+                            "disposition": "changes_requested",
+                            "findings": [
+                                {
+                                    "file": "README.md",
+                                    "message": "Need clearer health endpoint docs",
+                                    "severity": "major",
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                ).returncode,
+                0,
+            )
+            run_dir = data_dir / "runs" / run_id
+            original_build = (run_dir / "build-report-1.json").read_text(
+                encoding="utf-8"
+            )
+            original_checks = (run_dir / "checks-1.json").read_text(encoding="utf-8")
+            original_review = (run_dir / "review-1.json").read_text(encoding="utf-8")
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "builder": {
+                            "output": {
+                                "commands_run": [],
+                                "files_changed": ["README.md"],
+                                "steps_completed": ["P1"],
+                                "unresolved_issues": [],
+                            },
+                            "writes": {
+                                "README.md": "# Target\n\nRepaired documentation.\n"
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                agentflow(
+                    "advance",
+                    run_id,
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                ).returncode,
+                0,
+            )
+            fixture_path.write_text(
+                json.dumps({"reviewer": {"disposition": "approve", "findings": []}}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                (run_dir / "build-report-1.json").read_text(encoding="utf-8"),
+                original_build,
+            )
+            self.assertEqual(
+                (run_dir / "checks-1.json").read_text(encoding="utf-8"),
+                original_checks,
+            )
+            self.assertEqual(
+                (run_dir / "review-1.json").read_text(encoding="utf-8"),
+                original_review,
+            )
+            self.assertNotEqual(
+                (run_dir / "checks-2.json").read_text(encoding="utf-8"),
+                original_checks,
+            )
+            self.assertNotEqual(
+                (run_dir / "review-2.json").read_text(encoding="utf-8"),
+                original_review,
+            )
+            self.assertTrue((run_dir / "repair-report-1.json").is_file())
+
+    def test_legacy_flat_artifact_runs_remain_replayable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_built_run(temp_path, environment)
+            run_dir = data_dir / "runs" / run_id
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            build_ready = next(e for e in events if e["type"] == "build_ready")
+            candidate_sha = build_ready["candidate_sha"]
+            legacy_report = run_dir / "build-report.json"
+            legacy_report.write_text(
+                (run_dir / "build-report-1.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            rewritten = []
+            for event in events:
+                if event["type"] == "build_ready":
+                    event = {**event, "artifact": str(legacy_report)}
+                rewritten.append(event)
+            (run_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event, sort_keys=True) + "\n" for event in rewritten),
+                encoding="utf-8",
+            )
+            status = agentflow(
+                "status",
+                run_id,
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(json.loads(status.stdout)["state"], "built")
+            self.assertEqual(json.loads(status.stdout)["candidate_sha"], candidate_sha)
+            listed = agentflow(
+                "list",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            entry = next(
+                item for item in json.loads(listed.stdout) if item["run_id"] == run_id
+            )
+            self.assertEqual(entry["candidate_sha"], candidate_sha)
 
 
 if __name__ == "__main__":

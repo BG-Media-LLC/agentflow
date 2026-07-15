@@ -76,6 +76,16 @@ agentflow advance <run-id>                   # authoritative checks
 agentflow advance <run-id> --adapter cursor  # read-only review
 ```
 
+When status reports `changes_requested`, advance again with a builder adapter to
+repair (at most two repairs after the initial build). Each repair commits a new
+candidate and re-enters `built` so checks and review must rerun:
+
+```bash
+agentflow advance <run-id> --adapter cursor  # repair from changes_requested
+agentflow advance <run-id>                   # re-run authoritative checks
+agentflow advance <run-id> --adapter cursor  # re-run read-only review
+```
+
 If the current model provider has no Agent Adapter or its executable is not
 installed, do not bypass the workflow and do not fake stage evidence. Build,
 test, and land an adapter for that provider first — as Bootstrap Development
@@ -98,6 +108,19 @@ agentflow approve <run-id> --approved-by <human identity>
 
 Do not translate ordinary conversational agreement into approval.
 
+## Record rejection
+
+If the user explicitly rejects a plan or a candidate, record it with the
+claim-guarded reject command. From `planned` this appends terminal
+`plan_rejected`. From `awaiting_human` this appends terminal `human_rejected`
+bound to the candidate SHA. Conversation text is never rejection evidence:
+
+```bash
+agentflow reject <run-id> --rejected-by <human identity> [--reason <text>]
+```
+
+Rejected Runs cannot advance, approve, abandon, rebase, or be rejected again.
+
 ## Preserve gate integrity
 
 - Never claim a plan, build, check, review, approval, merge, or deployment
@@ -105,5 +128,5 @@ Do not translate ordinary conversational agreement into approval.
 - Never bypass a failed or unavailable gate by editing run evidence manually.
 - Never let an agent's prose override command exit status or test results.
 - Require explicit human approval before merge.
-- Do not imply that unimplemented tester, repair, merge, post-merge, or
-  deployment stages have executed.
+- Do not imply that unimplemented tester, merge, post-merge, or deployment
+  stages have executed.
