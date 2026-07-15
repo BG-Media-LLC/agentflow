@@ -20,6 +20,7 @@ agentflow watch <run-id>
 agentflow list [--state <state>]
 agentflow approve <run-id> --approved-by <human identity>
 agentflow abandon <run-id> --abandoned-by <identity> [--reason <text>]
+agentflow rebase <run-id>
 ```
 
 - `init` installs the canonical project-local Agentflow skill and a managed
@@ -84,6 +85,30 @@ agentflow abandon <run-id> --abandoned-by <identity> [--reason <text>]
   abandoned out from under it. The event records the required `--abandoned-by`
   identity and the optional `--reason`. Abandoning an already-abandoned or
   `human_approved` Run fails.
+- `rebase` refreshes a committed candidate onto the Target Repository's current
+  main head so a Run whose base has fallen behind can be mechanically refreshed
+  instead of abandoned. It first performs a read-only up-to-date check *before*
+  acquiring any claim: it resolves the Target Repository's current main head
+  (`git rev-parse HEAD` in the recorded repository path) and, when the Run's
+  replayed base already equals it, returns `rebased: false` with the unchanged
+  `base_sha` and appends no event at all. Otherwise it acquires the Run's stage
+  claim, releases it in a `finally` block, and re-validates the replayed state
+  under the claim: it applies only to `built`, `verified`, `changes_requested`,
+  and `awaiting_human` (states with a committed candidate) and fails clearly on
+  `ready`, `planned`, `failed`, `abandoned`, and `human_approved`. Under the
+  claim it requires a clean Workspace, captures the prior Workspace HEAD, and
+  runs `git rebase <new main head>` inside the Workspace. On clean application
+  it verifies the Workspace is clean and appends one `candidate_rebased` event
+  recording `old_base_sha`, `new_base_sha`, `old_candidate_sha`, and
+  `new_candidate_sha` (the rebased Workspace HEAD). On conflict it runs
+  `git rebase --abort`, restores the prior Workspace HEAD, and exits nonzero
+  with a conflict message, appending no events beyond claim bookkeeping and
+  leaving state, base, candidate, and the Workspace unchanged. `rebase` operates
+  only inside the Workspace: it never touches the Target Repository's primary
+  checkout, never pushes, and never merges. Because `candidate_rebased` projects
+  state `built`, the existing checks and reviewer stages re-run against the new
+  candidate and approval re-binds to the new SHA through the `awaiting_human`
+  gate.
 
 ## Agentflow Home
 
@@ -126,6 +151,7 @@ New events contain a one-based `sequence` equal to their line number in
 | `workspace_ready` | `ready` |
 | `plan_ready` | `planned` |
 | `build_ready` | `built` |
+| `candidate_rebased` | `built` |
 | `checks_passed` | `verified` |
 | `checks_failed` | `failed` |
 | `review_blocked` | `changes_requested` |
@@ -151,6 +177,13 @@ any sequence number that is present must match its line position.
 The Repository Profile path reported by `status` is replayed from
 `repository_profile_captured`, rather than rediscovered from the current Target
 Repository.
+`candidate_rebased` carries `old_base_sha`, `new_base_sha`, `old_candidate_sha`,
+and `new_candidate_sha`; it projects state `built`. When it is present, `status`
+and `list` replay the latest rebased base (`new_base_sha`) as `base_sha` and the
+rebased candidate (`new_candidate_sha`) as `candidate_sha`; runs without a rebase
+event keep the `base_sha` recorded in `repository.json`. The checks stage
+resolves its candidate SHA from the newest of `build_ready` and
+`candidate_rebased`, so checks re-run against the rebased candidate.
 
 ## Stage claims
 
@@ -219,6 +252,12 @@ the only claim authority: no lock file or second store of claim state exists.
   release it, on completion or failure alike.
 - Approval requires an explicit command, identity, clean Workspace, and exact
   candidate SHA.
+- A candidate may be rebased onto the Target Repository's advanced main only
+  from a state with a committed candidate, only inside the Workspace, and never
+  against the Target Repository's primary checkout; an up-to-date Run appends no
+  event, and a conflicting rebase aborts and leaves state, base, candidate, and
+  the Workspace unchanged. A rebased candidate re-enters `built` so it must pass
+  checks, review, and the human gate again.
 - No agent report can override command exit status or recorded evidence.
 - Target Repository documentation never becomes Agentflow documentation.
 

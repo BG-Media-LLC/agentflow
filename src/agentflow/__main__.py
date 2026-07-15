@@ -23,6 +23,7 @@ from .run_kernel import (
     follow_run,
     list_runs,
     read_run_status,
+    rebase_run,
     start_run,
 )
 from .workflow import advance_run
@@ -56,6 +57,9 @@ def main() -> int:
     approve_parser.add_argument("run_id")
     approve_parser.add_argument("--approved-by", required=True)
     approve_parser.add_argument("--data-dir", type=Path)
+    rebase_parser = subcommands.add_parser("rebase")
+    rebase_parser.add_argument("run_id")
+    rebase_parser.add_argument("--data-dir", type=Path)
     advance_parser = subcommands.add_parser("advance")
     advance_parser.add_argument("run_id")
     advance_parser.add_argument("--adapter", choices=("claude", "codex", "fake"))
@@ -211,6 +215,32 @@ def main() -> int:
                 sort_keys=True,
             )
         )
+        return 0
+
+    if args.command == "rebase":
+        result = rebase_run(
+            run_id=args.run_id,
+            data_dir=agentflow_home(args.data_dir),
+        )
+        if result.rebased:
+            response = {
+                "base_sha": result.new_base_sha,
+                "new_base_sha": result.new_base_sha,
+                "new_candidate_sha": result.new_candidate_sha,
+                "old_base_sha": result.old_base_sha,
+                "old_candidate_sha": result.old_candidate_sha,
+                "rebased": True,
+                "run_id": result.run_id,
+                "state": result.state,
+            }
+        else:
+            response = {
+                "base_sha": result.base_sha,
+                "rebased": False,
+                "run_id": result.run_id,
+                "state": result.state,
+            }
+        print(json.dumps(response, sort_keys=True))
         return 0
 
     if args.command == "models":

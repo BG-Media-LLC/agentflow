@@ -43,6 +43,20 @@ Every behavior statement carries one of three classifications:
   identity and an optional reason. An abandoned Run can never advance and can
   never be approved, and abandoning an already-abandoned or `human_approved`
   Run fails. Abandonment does not remove the Run's Workspace or worktree.
+- **Implemented.** Candidate rebase with mandatory re-verification: `rebase`
+  refreshes a Run whose base has fallen behind onto the Target Repository's
+  current main head instead of forcing abandonment, enabling concurrent Runs. A
+  read-only up-to-date check runs before any claim is acquired, so a Run already
+  on main appends no event; otherwise the Run's stage claim guards the rebase,
+  which applies only from a state with a committed candidate (`built`,
+  `verified`, `changes_requested`, `awaiting_human`) and fails clearly on
+  pre-candidate and terminal states. A clean rebase appends one
+  `candidate_rebased` event that re-enters state `built`; a conflict aborts and
+  leaves state, base, candidate, and the Workspace unchanged. The rebase runs
+  only inside the Workspace and never touches the Target Repository's primary
+  checkout, pushes, or merges. Approval invalidation on rebase is inherent:
+  approval binds to the exact candidate SHA, and a rebase produces a new SHA
+  that must pass checks, review, and the `awaiting_human` gate again.
 - **Target.** Explicit plan approval, a tester role, bounded builder-fix retry
   loops, a constrained Merge Agent, and Post-Merge Verification. Merge and
   deployment remain manual after approval until these exist.

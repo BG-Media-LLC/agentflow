@@ -151,9 +151,11 @@ def _advance_claimed_run(
             .splitlines()
         ]
         candidate_sha = next(
-            event["candidate_sha"]
+            event["new_candidate_sha"]
+            if event["type"] == "candidate_rebased"
+            else event["candidate_sha"]
             for event in reversed(events)
-            if event["type"] == "build_ready"
+            if event["type"] in ("build_ready", "candidate_rebased")
         )
         if _git("rev-parse", "HEAD", cwd=workspace) != candidate_sha:
             raise ValueError("Workspace HEAD no longer matches the candidate SHA")

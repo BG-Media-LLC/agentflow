@@ -69,6 +69,18 @@ class Abandonment:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class RebasedRun:
+    run_id: str
+    state: str
+    rebased: bool
+    base_sha: str
+    old_base_sha: str | None = None
+    new_base_sha: str | None = None
+    old_candidate_sha: str | None = None
+    new_candidate_sha: str | None = None
+
+
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", *args],
@@ -165,11 +177,13 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
     repository_profile_path: str | None = None
     candidate_sha: str | None = None
     approved_sha: str | None = None
+    rebased_base_sha: str | None = None
     state_by_event = {
         "run_created": "created",
         "workspace_ready": "ready",
         "plan_ready": "planned",
         "build_ready": "built",
+        "candidate_rebased": "built",
         "checks_passed": "verified",
         "checks_failed": "failed",
         "review_ready": "reviewed",
@@ -196,6 +210,9 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
             repository_profile_path = event.get("path")
         if event.get("candidate_sha") is not None:
             candidate_sha = event["candidate_sha"]
+        if event["type"] == "candidate_rebased":
+            candidate_sha = event["new_candidate_sha"]
+            rebased_base_sha = event["new_base_sha"]
         if event["type"] == "human_approved":
             approved_sha = event.get("approved_sha")
 
@@ -212,7 +229,9 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
         state=state,
         summary=task.get("summary"),
         repository=repository.get("repository"),
-        base_sha=repository.get("base_sha"),
+        base_sha=rebased_base_sha
+        if rebased_base_sha is not None
+        else repository.get("base_sha"),
         worktree=worktree,
         repository_profile_path=repository_profile_path,
         candidate_sha=candidate_sha,
@@ -361,6 +380,105 @@ def abandon_run(
             state="abandoned",
             abandoned_by=abandoned_by,
             reason=reason,
+        )
+    finally:
+        release_claim(data_dir=data_dir, run_id=run_id, holder=holder)
+
+
+# Replayed states with a committed candidate that a rebase may refresh.
+REBASEABLE_STATES = frozenset(
+    {"built", "verified", "changes_requested", "awaiting_human"}
+)
+
+
+def rebase_run(*, run_id: str, data_dir: Path) -> RebasedRun:
+    """Refresh a committed candidate onto the Target Repository's current main.
+
+    Performs a read-only up-to-date check before acquiring any claim: if the
+    Run's recorded base already equals the Target Repository's current main
+    head, it returns without appending a single event. Otherwise it acquires
+    the Run's stage claim, re-validates the replayed state, rebases the
+    Workspace branch onto the new main head, and on clean application appends
+    one ``candidate_rebased`` event. On conflict it aborts the rebase, restores
+    the prior Workspace HEAD, and raises, leaving state, base, candidate, and
+    the Workspace unchanged. It never touches the Target Repository's primary
+    checkout, never pushes, and never merges.
+    """
+    status = read_run_status(run_id=run_id, data_dir=data_dir)
+    if status.repository is None:
+        raise ValueError(f"run {run_id} has no recorded Target Repository")
+    if status.worktree is None:
+        raise ValueError(f"run {run_id} has no Workspace")
+    new_base_sha = _git("rev-parse", "HEAD", cwd=Path(status.repository))
+    if status.base_sha == new_base_sha:
+        return RebasedRun(
+            run_id=run_id,
+            state=status.state,
+            rebased=False,
+            base_sha=status.base_sha,
+        )
+
+    holder = default_claim_holder()
+    acquire_claim(data_dir=data_dir, run_id=run_id, holder=holder)
+    try:
+        status = read_run_status(run_id=run_id, data_dir=data_dir)
+        if status.state not in REBASEABLE_STATES:
+            raise ValueError(
+                f"run {run_id} cannot be rebased from state {status.state}"
+            )
+        if status.worktree is None:
+            raise ValueError(f"run {run_id} has no Workspace")
+        workspace = Path(status.worktree)
+        if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
+            raise ValueError(
+                f"run {run_id} Workspace must be clean before rebasing"
+            )
+        old_base_sha = status.base_sha
+        old_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
+        rebased = subprocess.run(
+            ["git", "rebase", new_base_sha],
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if rebased.returncode != 0:
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=workspace,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if _git("rev-parse", "HEAD", cwd=workspace) != old_candidate_sha:
+                _git("reset", "--hard", old_candidate_sha, cwd=workspace)
+            raise ValueError(
+                f"run {run_id} rebase onto {new_base_sha} conflicts; "
+                "Workspace restored and left unchanged"
+            )
+        if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
+            raise ValueError(
+                f"run {run_id} Workspace is not clean after rebasing"
+            )
+        new_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
+        append_event(
+            data_dir=data_dir,
+            run_id=run_id,
+            event_type="candidate_rebased",
+            new_base_sha=new_base_sha,
+            new_candidate_sha=new_candidate_sha,
+            old_base_sha=old_base_sha,
+            old_candidate_sha=old_candidate_sha,
+        )
+        return RebasedRun(
+            run_id=run_id,
+            state="built",
+            rebased=True,
+            base_sha=new_base_sha,
+            old_base_sha=old_base_sha,
+            new_base_sha=new_base_sha,
+            old_candidate_sha=old_candidate_sha,
+            new_candidate_sha=new_candidate_sha,
         )
     finally:
         release_claim(data_dir=data_dir, run_id=run_id, holder=holder)
