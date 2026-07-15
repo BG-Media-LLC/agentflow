@@ -152,30 +152,38 @@ Every behavior statement carries one of three classifications:
   must have one built, tested, and landed before Agentflow coordinates work
   through that provider. Coordinating work through an unadapted provider is
   not permitted as a workaround.
-- **Implemented.** Claude and Codex adapters, plus a deterministic fake for
-  tests. Their executables are overridable via the `AGENTFLOW_CLAUDE` and
-  `AGENTFLOW_CODEX` environment variables. Changing an adapter must not change
-  workflow state semantics, verification rules, or approval authority.
+- **Implemented.** Claude, Cursor, and Codex adapters, plus a deterministic fake
+  for tests. Their executables are overridable via `AGENTFLOW_CLAUDE`,
+  `AGENTFLOW_CURSOR`, and `AGENTFLOW_CODEX`. Changing an adapter must not
+  change workflow state semantics, verification rules, or approval authority.
 - **Implemented.** Planner and reviewer roles run read-only; the builder role
   is constrained by role instructions and the kernel's planned-path diff
-  enforcement rather than an operating-system sandbox in the Claude adapter.
+  enforcement. The Cursor builder additionally requests the Cursor CLI's
+  sandbox while auto-approving operations; the Claude builder does not provide
+  an operating-system sandbox.
+- **Implemented.** Cursor output is treated as untrusted model text because the
+  Cursor CLI has no documented JSON Schema output flag. The adapter prompts for
+  one JSON object, extracts a candidate object from result text that may retain
+  progress prose, validates it locally against the same role contracts, and
+  makes at most two output attempts before failing the stage.
 - **Implemented.** Recorded per-role model routing with suggestion fallback
-  and per-invocation provenance in the Claude adapter: `agentflow models`
-  shows and records the user's role-to-model choices in `models.json` in
-  Agentflow Home, each invocation resolves `advance --model`, then the
-  `AGENTFLOW_CLAUDE_<ROLE>_MODEL` environment variable, then the recorded
-  routing, then the suggested defaults, and the resolved model is recorded on
-  the stage's `plan_ready`, `build_ready`, `review_ready`, or
-  `review_blocked` event. The fake and Codex adapters route no models and
-  record no `model` field.
-- **Implemented.** Live role observability for the Claude adapter: each
-  planner, builder, and reviewer stage streams the provider's output
+  and per-invocation provenance in the Claude and Cursor adapters:
+  `agentflow models` shows and records the user's adapter-specific role-to-model
+  choices in `models.json` in Agentflow Home. Each invocation resolves
+  `advance --model`, then the adapter's `AGENTFLOW_<ADAPTER>_<ROLE>_MODEL`
+  environment variable, then recorded routing, then suggested defaults. The
+  resolved model is recorded on the stage's `plan_ready`, `build_ready`,
+  `review_ready`, or `review_blocked` event. The fake and Codex adapters route
+  no models and record no `model` field.
+- **Implemented.** Live role observability for the Claude and Cursor adapters:
+  each planner, builder, and reviewer stage streams the provider's output
   (`stream-json`) to a tailable `runs/<run-id>/<role>-transcript.jsonl`
   evidence file referenced from the stage event, and the read-only `watch`
   command follows a Run's events and growing transcript until it reaches a
-  state requiring external action. The fake and Codex adapters produce no
-  transcript. Streaming does not change workflow state, verification rules, or
-  approval authority.
+  state requiring external action. Cursor transcripts include a local attempt
+  marker before each bounded output attempt. The fake and Codex adapters
+  produce no transcript. Streaming does not change workflow state,
+  verification rules, or approval authority.
 - **Target.** Capability-based model routing across providers, beyond the
   Claude adapter's recorded per-role routing.
 - **Target.** A durable projection or UI over role transcripts beyond the

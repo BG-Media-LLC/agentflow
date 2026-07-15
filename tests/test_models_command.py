@@ -15,6 +15,11 @@ from test_advance_command import (
 
 
 SUGGESTED = {"builder": "opus", "planner": "opus", "reviewer": "opus"}
+CURSOR_SUGGESTED = {
+    "builder": "claude-opus-4-8-thinking-high",
+    "planner": "claude-opus-4-8-thinking-high",
+    "reviewer": "claude-opus-4-8-thinking-high",
+}
 
 PLANNER_STUB_TEMPLATE = """#!/usr/bin/env python3
 import json
@@ -264,7 +269,7 @@ class ModelsCommandTests(unittest.TestCase):
             self.assertEqual(planned.returncode, 0, planned.stderr)
             self.assertEqual(json.loads(planned.stdout)["state"], "planned")
 
-    def test_advance_rejects_model_option_for_non_claude_adapters(self) -> None:
+    def test_advance_rejects_model_option_for_non_routing_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             environment = base_environment()
@@ -283,7 +288,9 @@ class ModelsCommandTests(unittest.TestCase):
             )
 
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("--model requires --adapter claude", rejected.stderr)
+            self.assertIn(
+                "--model requires --adapter claude or cursor", rejected.stderr
+            )
 
     def test_models_get_and_set_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -301,7 +308,10 @@ class ModelsCommandTests(unittest.TestCase):
             self.assertEqual(empty.returncode, 0, empty.stderr)
             self.assertEqual(
                 json.loads(empty.stdout),
-                {"claude": {"recorded": {}, "suggested": SUGGESTED}},
+                {
+                    "claude": {"recorded": {}, "suggested": SUGGESTED},
+                    "cursor": {"recorded": {}, "suggested": CURSOR_SUGGESTED},
+                },
             )
 
             recorded = agentflow(
@@ -324,7 +334,8 @@ class ModelsCommandTests(unittest.TestCase):
                     "claude": {
                         "recorded": {"builder": "opus", "planner": "fable"},
                         "suggested": SUGGESTED,
-                    }
+                    },
+                    "cursor": {"recorded": {}, "suggested": CURSOR_SUGGESTED},
                 },
             )
             self.assertEqual(

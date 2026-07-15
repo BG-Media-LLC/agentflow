@@ -57,23 +57,23 @@ then record the answer:
 
 ```bash
 agentflow models                                             # inspect routing
-agentflow models --adapter claude --set planner=fable --set builder=opus
+agentflow models --adapter cursor --set planner=claude-opus-4-8-thinking-high
 ```
 
 Never silently assume a model choice. Each invocation resolves the model per
 role in this order: `advance --model` (one stage only), then the
-`AGENTFLOW_CLAUDE_<ROLE>_MODEL` environment variable, then the recorded
+`AGENTFLOW_<ADAPTER>_<ROLE>_MODEL` environment variable, then the recorded
 `models.json` routing in Agentflow Home, then the adapter's suggested
 defaults.
 
 Advance exactly one recorded stage at a time, selecting an installed Agent
-Adapter (`claude` or `codex`) for the stages that require one:
+Adapter (`claude`, `cursor`, or `codex`) for the stages that require one:
 
 ```bash
-agentflow advance <run-id> --adapter claude  # plan
-agentflow advance <run-id> --adapter claude  # build and commit candidate
+agentflow advance <run-id> --adapter cursor  # plan
+agentflow advance <run-id> --adapter cursor  # build and commit candidate
 agentflow advance <run-id>                   # authoritative checks
-agentflow advance <run-id> --adapter claude  # read-only review
+agentflow advance <run-id> --adapter cursor  # read-only review
 ```
 
 If the current model provider has no Agent Adapter or its executable is not

@@ -9,6 +9,7 @@ from .agent_adapter import (
     SUGGESTED_MODELS,
     ClaudeAdapter,
     CodexAdapter,
+    CursorAdapter,
     DeterministicFakeAdapter,
     read_model_routing,
     record_model_routing,
@@ -62,7 +63,9 @@ def main() -> int:
     rebase_parser.add_argument("--data-dir", type=Path)
     advance_parser = subcommands.add_parser("advance")
     advance_parser.add_argument("run_id")
-    advance_parser.add_argument("--adapter", choices=("claude", "codex", "fake"))
+    advance_parser.add_argument(
+        "--adapter", choices=("claude", "codex", "cursor", "fake")
+    )
     advance_parser.add_argument("--adapter-fixture", type=Path)
     advance_parser.add_argument(
         "--claim-lease-seconds",
@@ -278,8 +281,8 @@ def main() -> int:
         return 0
 
     if args.command == "advance":
-        if args.model is not None and args.adapter != "claude":
-            parser.error("--model requires --adapter claude")
+        if args.model is not None and args.adapter not in {"claude", "cursor"}:
+            parser.error("--model requires --adapter claude or cursor")
         adapter = None
         if args.adapter == "fake":
             if args.adapter_fixture is None:
@@ -292,6 +295,11 @@ def main() -> int:
             )
         elif args.adapter == "codex":
             adapter = CodexAdapter()
+        elif args.adapter == "cursor":
+            adapter = CursorAdapter(
+                data_dir=agentflow_home(args.data_dir),
+                model=args.model,
+            )
         result = advance_run(
             run_id=args.run_id,
             data_dir=agentflow_home(args.data_dir),

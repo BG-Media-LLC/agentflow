@@ -6,9 +6,15 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
-from .contracts import contract_schema
+from .contracts import (
+    ContractError,
+    contract_schema,
+    validate_builder_report,
+    validate_plan,
+    validate_review,
+)
 
 
 ROLE_INSTRUCTIONS = {
@@ -30,6 +36,11 @@ ROLES = ("planner", "builder", "reviewer")
 
 SUGGESTED_MODELS = {
     "claude": {"builder": "opus", "planner": "opus", "reviewer": "opus"},
+    "cursor": {
+        "builder": "claude-opus-4-8-thinking-high",
+        "planner": "claude-opus-4-8-thinking-high",
+        "reviewer": "claude-opus-4-8-thinking-high",
+    },
 }
 
 
@@ -73,6 +84,40 @@ def role_prompt(role: str, request: dict[str, Any]) -> str:
         "Workflow context:\n"
         + json.dumps(request, indent=2, sort_keys=True)
     )
+
+
+def _validate_role_output(role: str, value: Any) -> dict[str, Any]:
+    validators = {
+        "planner": validate_plan,
+        "builder": validate_builder_report,
+        "reviewer": validate_review,
+    }
+    return validators[role](value)
+
+
+def _parse_cursor_output(role: str, raw_output: Any) -> dict[str, Any]:
+    if isinstance(raw_output, dict):
+        return _validate_role_output(role, raw_output)
+    if not isinstance(raw_output, str):
+        raise ContractError("Cursor result must contain text or an object")
+    decoder = json.JSONDecoder()
+    errors: list[Exception] = []
+    try:
+        return _validate_role_output(role, json.loads(raw_output))
+    except (ContractError, json.JSONDecodeError, TypeError) as error:
+        errors.append(error)
+    # Cursor may concatenate progress prose with the final answer in the result
+    # envelope. Scan every object boundary and accept only an object that passes
+    # the role contract; arbitrary prose or unrelated JSON remains untrusted.
+    for index, character in enumerate(raw_output):
+        if character != "{":
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(raw_output[index:])
+            return _validate_role_output(role, candidate)
+        except (ContractError, json.JSONDecodeError, TypeError) as error:
+            errors.append(error)
+    raise ContractError(f"Cursor result contains no valid role object: {errors[-1]}")
 
 
 class AgentAdapter(Protocol):
@@ -185,6 +230,189 @@ class CodexAdapter:
                     f"Codex adapter failed for role {role}:\n{completed.stderr}"
                 )
             return json.loads(output_path.read_text(encoding="utf-8"))
+
+
+class CursorAdapter:
+    name = "cursor"
+    _MAX_OUTPUT_ATTEMPTS = 2
+
+    def __init__(
+        self,
+        executable: str | None = None,
+        *,
+        data_dir: Path | None = None,
+        model: str | None = None,
+    ) -> None:
+        self._executable = executable or os.environ.get("AGENTFLOW_CURSOR", "agent")
+        self._data_dir = data_dir
+        self._model = model
+        self.last_resolved_model: str | None = None
+
+    def resolve_model(self, role: str) -> str:
+        _validate_role(role)
+        if self._model is not None:
+            return self._model
+        environment_model = os.environ.get(
+            f"AGENTFLOW_CURSOR_{role.upper()}_MODEL"
+        )
+        if environment_model:
+            return environment_model
+        if self._data_dir is not None:
+            recorded = read_model_routing(self._data_dir).get(self.name, {})
+            recorded_model = recorded.get(role)
+            if recorded_model:
+                return recorded_model
+        return SUGGESTED_MODELS[self.name][role]
+
+    def invoke(
+        self,
+        *,
+        role: str,
+        request: dict[str, Any],
+        workspace: Path,
+        transcript_path: Path | None = None,
+    ) -> dict[str, Any]:
+        model = self.resolve_model(role)
+        self.last_resolved_model = model
+        prompt = (
+            role_prompt(role, request)
+            + "\n\nReturn exactly one JSON object with no Markdown fences or "
+            "commentary. It must satisfy this JSON Schema:\n"
+            + json.dumps(contract_schema(role), indent=2, sort_keys=True)
+        )
+        last_contract_error: Exception | None = None
+        transcript_file = None
+        try:
+            if transcript_path is not None:
+                transcript_path.parent.mkdir(parents=True, exist_ok=True)
+                transcript_file = transcript_path.open("w", encoding="utf-8")
+            for attempt in range(1, self._MAX_OUTPUT_ATTEMPTS + 1):
+                if transcript_file is not None:
+                    transcript_file.write(
+                        json.dumps(
+                            {
+                                "adapter": self.name,
+                                "attempt": attempt,
+                                "type": "agentflow_adapter_attempt",
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+                    transcript_file.flush()
+                result_event = self._run_attempt(
+                    role=role,
+                    workspace=workspace,
+                    model=model,
+                    prompt=prompt,
+                    transcript_file=transcript_file,
+                )
+                raw_output = result_event.get("result")
+                try:
+                    return _parse_cursor_output(role, raw_output)
+                except (ContractError, json.JSONDecodeError, TypeError) as error:
+                    last_contract_error = error
+                    prompt += (
+                        "\n\nYour previous response failed local validation: "
+                        f"{error}. Return a corrected JSON object only. Do not "
+                        "repeat or undo completed repository edits."
+                    )
+        finally:
+            if transcript_file is not None:
+                transcript_file.close()
+        raise RuntimeError(
+            f"Cursor adapter returned invalid structured output for role {role} "
+            f"after {self._MAX_OUTPUT_ATTEMPTS} attempts: {last_contract_error}"
+        )
+
+    def _run_attempt(
+        self,
+        *,
+        role: str,
+        workspace: Path,
+        model: str,
+        prompt: str,
+        transcript_file: TextIO | None,
+    ) -> dict[str, Any]:
+        arguments = [
+            self._executable,
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--workspace",
+            str(workspace),
+            "--trust",
+            "--model",
+            model,
+        ]
+        if role in {"planner", "reviewer"}:
+            arguments.extend(["--mode", "ask"])
+        else:
+            arguments.extend(["--force", "--sandbox", "enabled"])
+        arguments.append(prompt)
+        process = subprocess.Popen(
+            arguments,
+            cwd=workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stderr_chunks: list[str] = []
+
+        def _drain_stderr() -> None:
+            assert process.stderr is not None
+            stderr_chunks.append(process.stderr.read())
+
+        stderr_reader = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_reader.start()
+        result_event: dict[str, Any] | None = None
+        assert process.stdout is not None
+        for line in process.stdout:
+            if transcript_file is not None:
+                transcript_file.write(line)
+                transcript_file.flush()
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                result_event = event
+        try:
+            returncode = process.wait(timeout=3600)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise
+        stderr_reader.join()
+        stderr_text = "".join(stderr_chunks)
+        if returncode != 0:
+            raise RuntimeError(
+                f"Cursor adapter failed for role {role} with exit "
+                f"{returncode}:\n{stderr_text}"
+            )
+        if result_event is None:
+            raise RuntimeError(
+                f"Cursor adapter returned no result event for role {role}"
+            )
+        if result_event.get("subtype") != "success":
+            diagnostics = {
+                key: result_event.get(key)
+                for key in (
+                    "subtype",
+                    "duration_ms",
+                    "duration_api_ms",
+                    "session_id",
+                )
+                if result_event.get(key) is not None
+            }
+            raise RuntimeError(
+                f"Cursor adapter reported failure for role {role}: "
+                f"{json.dumps(diagnostics, sort_keys=True)}\n"
+                f"{result_event.get('result')}"
+            )
+        return result_event
 
 
 class ClaudeAdapter:

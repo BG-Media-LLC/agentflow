@@ -13,8 +13,8 @@ agentflow init
 agentflow profile --check "<command>"
 agentflow start "<task summary>"
 agentflow run <task.json>
-agentflow advance <run-id> [--adapter claude|codex] [--model <model>] [--claim-lease-seconds <seconds>]
-agentflow models [--adapter claude --set <role>=<model>]
+agentflow advance <run-id> [--adapter claude|cursor|codex] [--model <model>] [--claim-lease-seconds <seconds>]
+agentflow models [--adapter claude|cursor --set <role>=<model>]
 agentflow status <run-id>
 agentflow watch <run-id>
 agentflow list [--state <state>]
@@ -41,6 +41,16 @@ agentflow rebase <run-id>
   `result` stream event still supplies the schema-validated structured output,
   with unchanged error semantics for nonzero exit, error subtype, and missing
   structured output. The fake and Codex adapters produce no transcript.
+- The Cursor adapter invokes the `agent` CLI in headless `stream-json` mode,
+  using `ask` mode for read-only planner and reviewer stages and `--force
+  --sandbox enabled` for the builder. Because the Cursor CLI has no documented
+  schema-constrained output option, the adapter prompts for one JSON object,
+  extracts a candidate object from result text that may include progress prose,
+  validates it locally against the role contract, and permits at most two
+  output attempts. It writes every stream line to the same role transcript,
+  preceded by an `agentflow_adapter_attempt` marker for each attempt. Nonzero
+  exits, missing result events, and non-success result subtypes fail
+  immediately with available diagnostics.
 - `watch` follows a Run live and read-only: it prints each new line appended to
   the Run's `events.jsonl` and to whichever `<role>-transcript.jsonl` is
   growing, projecting Run State each poll, and prints a final status line and
@@ -49,24 +59,23 @@ agentflow rebase <run-id>
   `human_approved`). It exits promptly when that condition is already true and
   never creates or modifies any evidence file.
 - `advance --model` pins the model for the single stage that invocation
-  performs and is accepted only with `--adapter claude`. The Claude adapter
-  resolves each role's model in precedence order — explicit `--model`, then
-  the `AGENTFLOW_CLAUDE_PLANNER_MODEL`, `AGENTFLOW_CLAUDE_BUILDER_MODEL`, or
-  `AGENTFLOW_CLAUDE_REVIEWER_MODEL` environment variable, then the routing
-  recorded in `models.json` in Agentflow Home, then the adapter's suggested
-  defaults (`opus` for every role; `fable` is reserved for the orchestrating
-  session, not the role adapters) — and passes the resolved model to the
-  `claude` CLI as `--model`. The model is resolved exactly once per invocation
-  and that single value is both passed to the CLI and stamped as the stage
-  event's `model` provenance; the workflow never re-resolves it.
+  performs and is accepted with `--adapter claude` or `--adapter cursor`.
+  Each routing adapter resolves a role's model in precedence order — explicit
+  `--model`, then its `AGENTFLOW_<ADAPTER>_<ROLE>_MODEL` environment variable,
+  then routing recorded in `models.json` in Agentflow Home, then the adapter's
+  suggested default. Claude suggests `opus` for every role; Cursor suggests
+  `claude-opus-4-8-thinking-high` for every role. The resolved model is passed
+  to the provider CLI and stamped on the stage event from that same single
+  resolution; the workflow never re-resolves it.
 - `models` honors `--data-dir` and, with no arguments, prints a sorted JSON
-  object mapping each model-routing adapter (currently `claude`) to its
+  object mapping each model-routing adapter (`claude` and `cursor`) to its
   `recorded` routing from `models.json` (an empty object when nothing is
-  recorded) and its `suggested` defaults. With `--adapter claude` and
-  repeatable `--set role=model` it validates role names against `planner`,
-  `builder`, and `reviewer`, merges the choices into `models.json`, and prints
-  the updated routing in the same shape. `models.json` stores the user's
-  recorded preference only; per-invocation provenance lives in the event log.
+  recorded) and its `suggested` defaults. With `--adapter claude` or
+  `--adapter cursor` and repeatable `--set role=model`, it validates role names
+  against `planner`, `builder`, and `reviewer`, merges the choices into
+  `models.json`, and prints the updated routing in the same shape.
+  `models.json` stores the user's recorded preference only; per-invocation
+  provenance lives in the event log.
 - `run` imports a JSON Task Spec into the same kernel for compatibility.
 - `status` replays events in sequence and combines the result with captured
   input metadata. Its JSON includes `repository_profile_path` when a
@@ -162,11 +171,12 @@ New events contain a one-based `sequence` equal to their line number in
 
 `plan_ready`, `build_ready`, `review_ready`, and `review_blocked` carry a
 `model` field naming the resolved model whenever the invoking adapter routes
-models (currently the Claude adapter); the deterministic fake and Codex
-adapters record no `model` field. The same four events also carry a
+models (currently the Claude and Cursor adapters); the deterministic fake and
+Codex adapters record no `model` field. The same four events also carry a
 `transcript` field naming the `<role>-transcript.jsonl` evidence file whenever
-the invoking adapter produced one (currently only the Claude adapter); the fake
-and Codex adapters produce no transcript and therefore no `transcript` field.
+the invoking adapter produced one (currently the Claude and Cursor adapters);
+the fake and Codex adapters produce no transcript and therefore no `transcript`
+field.
 Both fields are provenance only — state projection is unchanged.
 `repository_snapshotted`, `repository_profile_captured`, `claim_acquired`,
 `claim_released`, and `claim_expired` add evidence without changing state.
@@ -224,8 +234,8 @@ the only claim authority: no lock file or second store of claim state exists.
 - `src/agentflow/run_kernel.py` — Run lifecycle interface and implementation.
 - `src/agentflow/repository_profile.py` — target-local discovery and freshness.
 - `src/agentflow/contracts.py` — strict role-output validators and schemas.
-- `src/agentflow/agent_adapter.py` — provider boundary, Claude, Codex, and fake
-  adapters.
+- `src/agentflow/agent_adapter.py` — provider boundary and Claude, Cursor,
+  Codex, and fake adapters.
 - `src/agentflow/workflow.py` — state-driven stage orchestration and checks.
 - `src/agentflow/paths.py` — Agentflow Home resolution.
 - `src/agentflow/project_setup.py` — idempotent Target Repository setup.
@@ -265,10 +275,16 @@ the only claim authority: no lock file or second store of claim state exists.
 
 - Repository discovery is intentionally shallow and does not yet infer entry
   points, architecture, or repository-specific domain language.
-- Only the Claude, Codex, and deterministic fake provider adapters exist.
+- Only the Claude, Cursor, Codex, and deterministic fake provider adapters
+  exist.
 - The Claude adapter limits planner and reviewer roles to read-only tools, but
   its builder role relies on role instructions and the kernel's planned-path
   diff enforcement rather than an operating-system sandbox.
+- The Cursor CLI has no documented JSON Schema output flag or per-invocation
+  granular tool allowlist. The Cursor adapter therefore uses read-only `ask`
+  mode for planner and reviewer, requests the CLI sandbox for the builder, and
+  relies on prompt-plus-local-validation with a two-attempt bound for output
+  contracts.
 - No tester, bounded builder-fix loop, merger, or deployment adapter exists.
 - Worktree and Workspace cleanup is not implemented: `abandon` records the
   terminal state but leaves the Run's Workspace and branch on disk.
