@@ -101,6 +101,8 @@ def main() -> int:
             response["candidate_sha"] = result.candidate_sha
         if result.approved_sha is not None:
             response["approved_sha"] = result.approved_sha
+        if result.repository_profile_path is not None:
+            response["repository_profile_path"] = result.repository_profile_path
         print(json.dumps(response, sort_keys=True))
         return 0
 

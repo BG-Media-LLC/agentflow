@@ -30,7 +30,9 @@ agentflow approve <run-id> --approved-by <human identity>
   profile checks directly without a model.
 - `run` imports a JSON Task Spec into the same kernel for compatibility.
 - `status` replays events in sequence and combines the result with captured
-  input metadata.
+  input metadata. Its JSON includes `repository_profile_path` when a
+  `repository_profile_captured` event supplies that relative path; runs without
+  profile evidence retain the legacy response shape.
 - `approve` appends an explicit approval only when replayed state is
   `awaiting_human`. Conversation text is not approval evidence.
 
@@ -84,6 +86,9 @@ New events contain a one-based `sequence` equal to their line number in
 changing state. `review_ready` is immediately followed by `awaiting_human` in
 the current workflow. Legacy events without sequence numbers remain readable,
 but any sequence number that is present must match its line position.
+The Repository Profile path reported by `status` is replayed from
+`repository_profile_captured`, rather than rediscovered from the current Target
+Repository.
 
 ## Module map
 

@@ -24,6 +24,7 @@ class RunStatus:
     repository: str | None
     base_sha: str | None
     worktree: str | None
+    repository_profile_path: str | None
     candidate_sha: str | None
     approved_sha: str | None
 
@@ -129,6 +130,7 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
     run_dir = data_dir / "runs" / run_id
     state = "unknown"
     worktree: str | None = None
+    repository_profile_path: str | None = None
     candidate_sha: str | None = None
     approved_sha: str | None = None
     state_by_event = {
@@ -157,6 +159,8 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
         state = state_by_event.get(event["type"], state)
         if event["type"] == "workspace_ready":
             worktree = event.get("worktree")
+        if event["type"] == "repository_profile_captured":
+            repository_profile_path = event.get("path")
         if event.get("candidate_sha") is not None:
             candidate_sha = event["candidate_sha"]
         if event["type"] == "human_approved":
@@ -177,6 +181,7 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
         repository=repository.get("repository"),
         base_sha=repository.get("base_sha"),
         worktree=worktree,
+        repository_profile_path=repository_profile_path,
         candidate_sha=candidate_sha,
         approved_sha=approved_sha,
     )
