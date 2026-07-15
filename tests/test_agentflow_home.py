@@ -12,13 +12,12 @@ import unittest
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
-class RunCommandTests(unittest.TestCase):
-    def test_run_imports_a_task_file_into_the_real_kernel(self) -> None:
+class AgentflowHomeTests(unittest.TestCase):
+    def test_commands_share_the_agentflow_home_environment_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             repository = temp_path / "target"
-            task_path = temp_path / "task.json"
-            data_dir = temp_path / "workflow-data"
+            agentflow_home = temp_path / "external-evidence"
             repository.mkdir()
             subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
             subprocess.run(
@@ -39,31 +38,35 @@ class RunCommandTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
             )
-            task_path.write_text('{"summary": "Add a health endpoint"}\n', encoding="utf-8")
+            environment = {
+                **os.environ,
+                "AGENTFLOW_HOME": str(agentflow_home),
+                "PYTHONPATH": str(PROJECT_ROOT / "src"),
+            }
 
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "agentflow",
-                    "run",
-                    str(task_path),
-                    "--data-dir",
-                    str(data_dir),
-                ],
+            started = subprocess.run(
+                [sys.executable, "-m", "agentflow", "start", "Add health check"],
                 cwd=repository,
-                env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")},
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            run_id = json.loads(started.stdout)["run_id"]
+
+            status = subprocess.run(
+                [sys.executable, "-m", "agentflow", "status", run_id],
+                cwd=repository,
+                env=environment,
                 text=True,
                 capture_output=True,
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            response = json.loads(result.stdout)
-            self.assertEqual(response["state"], "ready")
-            self.assertTrue(response["run_id"])
-            self.assertTrue((data_dir / "runs" / response["run_id"] / "events.jsonl").is_file())
-            self.assertTrue(Path(response["worktree"]).is_dir())
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(json.loads(status.stdout)["state"], "ready")
+            self.assertTrue((agentflow_home / "runs" / run_id).is_dir())
 
 
 if __name__ == "__main__":

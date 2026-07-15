@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import uuid
 
 from .project_setup import initialize_repository
+from .paths import agentflow_home
+from .run_kernel import approve_run, read_run_status, start_run
 
 
 def main() -> int:
@@ -13,9 +14,19 @@ def main() -> int:
     subcommands = parser.add_subparsers(dest="command", required=True)
     init_parser = subcommands.add_parser("init")
     init_parser.add_argument("repository", nargs="?", type=Path, default=Path.cwd())
+    start_parser = subcommands.add_parser("start")
+    start_parser.add_argument("summary")
+    start_parser.add_argument("--data-dir", type=Path)
+    status_parser = subcommands.add_parser("status")
+    status_parser.add_argument("run_id")
+    status_parser.add_argument("--data-dir", type=Path)
+    approve_parser = subcommands.add_parser("approve")
+    approve_parser.add_argument("run_id")
+    approve_parser.add_argument("--approved-by", required=True)
+    approve_parser.add_argument("--data-dir", type=Path)
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("task", type=Path)
-    run_parser.add_argument("--data-dir", type=Path, required=True)
+    run_parser.add_argument("--data-dir", type=Path)
     args = parser.parse_args()
 
     if args.command == "init":
@@ -28,23 +39,78 @@ def main() -> int:
         )
         return 0
 
-    json.loads(args.task.read_text(encoding="utf-8"))
-    run_id = uuid.uuid4().hex
-    events_path = args.data_dir / "runs" / run_id / "events.jsonl"
-    events_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.command == "start":
+        result = start_run(
+            summary=args.summary,
+            repository=Path.cwd(),
+            data_dir=agentflow_home(args.data_dir),
+        )
+        print(
+            json.dumps(
+                {
+                    "run_id": result.run_id,
+                    "state": result.state,
+                    "worktree": str(result.worktree),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
 
-    events = (
-        {"type": "run_created", "run_id": run_id},
-        {"type": "workspace_ready"},
-        {"type": "plan_ready", "artifact": "fake-plan"},
-        {"type": "checks_passed", "artifact": "fake-checks"},
-        {"type": "awaiting_human"},
+    if args.command == "status":
+        result = read_run_status(
+            run_id=args.run_id,
+            data_dir=agentflow_home(args.data_dir),
+        )
+        print(
+            json.dumps(
+                {
+                    "base_sha": result.base_sha,
+                    "repository": result.repository,
+                    "run_id": result.run_id,
+                    "state": result.state,
+                    "summary": result.summary,
+                    "worktree": result.worktree,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command == "approve":
+        result = approve_run(
+            run_id=args.run_id,
+            approved_by=args.approved_by,
+            data_dir=agentflow_home(args.data_dir),
+        )
+        print(
+            json.dumps(
+                {
+                    "approved_by": result.approved_by,
+                    "run_id": result.run_id,
+                    "state": result.state,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    task = json.loads(args.task.read_text(encoding="utf-8"))
+    result = start_run(
+        summary=task["summary"],
+        repository=Path.cwd(),
+        data_dir=agentflow_home(args.data_dir),
     )
-    events_path.write_text(
-        "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
-        encoding="utf-8",
+    print(
+        json.dumps(
+            {
+                "run_id": result.run_id,
+                "state": result.state,
+                "worktree": str(result.worktree),
+            },
+            sort_keys=True,
+        )
     )
-    print(json.dumps({"run_id": run_id, "state": "awaiting_human"}, sort_keys=True))
     return 0
 
 

@@ -1,6 +1,7 @@
 # Agentflow starter
 
-This is the first tracer bullet of a reusable agentic engineering workflow engine. It intentionally contains no model SDK, Git integration, or remote services.
+This is the deterministic kernel of a reusable agentic engineering workflow
+engine. It intentionally contains no model SDK or remote orchestration service.
 
 ## Run the test
 
@@ -82,15 +83,43 @@ that tells compatible AI coding agents how to invoke the deterministic CLI.
 ## Run the workflow
 
 ```bash
-agentflow run examples/task.json --data-dir .agentflow
+cd /path/to/your-project
+agentflow start "Add a health endpoint"
 ```
 
-The command prints a run identifier and `awaiting_human`. Its append-only event history is written to:
+The command snapshots the Task Spec, repository path, and exact base commit;
+creates a unique Git branch and external worktree; and returns a run identifier
+in the `ready` state.
+
+Inspect the run from a new process:
+
+```bash
+agentflow status <run-id>
+```
+
+When a later workflow stage records `awaiting_human`, approval must be an
+explicit command with a human identity:
+
+```bash
+agentflow approve <run-id> --approved-by <identity>
+```
+
+`agentflow run examples/task.json` remains as a compatibility command for
+importing a JSON Task Spec into the same real kernel. It does not fabricate
+planning, testing, or approval evidence.
+
+Run Evidence and worktrees default to the platform's application-data
+directory. On macOS this is `~/Library/Application Support/Agentflow`. Override
+the location with `AGENTFLOW_HOME` or `--data-dir` for CI and isolated testing.
+
+The append-only event history is stored at:
 
 ```text
-.agentflow/runs/<run-id>/events.jsonl
+<Agentflow Home>/runs/<run-id>/events.jsonl
 ```
 
 ## Current contract
 
-`run` validates that the task is JSON, creates a unique run, records fake workspace/plan/check events, and pauses for human approval. The next test will add `status`, which must rebuild the reported state by replaying the event history in a new process.
+The kernel owns run identity, immutable input snapshots, Git worktree isolation,
+append-only events, state replay, and explicit human approval. Planner, builder,
+tester, reviewer, merger, and deployment adapters are not implemented yet.
