@@ -13,7 +13,7 @@ agentflow init
 agentflow profile --check "<command>"
 agentflow start "<task summary>"
 agentflow run <task.json>
-agentflow advance <run-id> [--adapter codex]
+agentflow advance <run-id> [--adapter claude|codex]
 agentflow status <run-id>
 agentflow approve <run-id> --approved-by <human identity>
 ```
@@ -96,7 +96,8 @@ Repository.
 - `src/agentflow/run_kernel.py` — Run lifecycle interface and implementation.
 - `src/agentflow/repository_profile.py` — target-local discovery and freshness.
 - `src/agentflow/contracts.py` — strict role-output validators and schemas.
-- `src/agentflow/agent_adapter.py` — provider boundary, Codex, and fake adapters.
+- `src/agentflow/agent_adapter.py` — provider boundary, Claude, Codex, and fake
+  adapters.
 - `src/agentflow/workflow.py` — state-driven stage orchestration and checks.
 - `src/agentflow/paths.py` — Agentflow Home resolution.
 - `src/agentflow/project_setup.py` — idempotent Target Repository setup.
@@ -126,7 +127,10 @@ Repository.
 
 - Repository discovery is intentionally shallow and does not yet infer entry
   points, architecture, or repository-specific domain language.
-- Only the Codex and deterministic fake provider adapters exist.
+- Only the Claude, Codex, and deterministic fake provider adapters exist.
+- The Claude adapter limits planner and reviewer roles to read-only tools, but
+  its builder role relies on role instructions and the kernel's planned-path
+  diff enforcement rather than an operating-system sandbox.
 - No tester, bounded builder-fix loop, merger, or deployment adapter exists.
 - Worktree cleanup and abandoned-run recovery are not implemented.
 - `advance` performs one stage per invocation; explicit plan approval and

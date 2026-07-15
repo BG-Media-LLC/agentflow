@@ -10,6 +10,31 @@ from typing import Any, Protocol
 from .contracts import contract_schema
 
 
+ROLE_INSTRUCTIONS = {
+    "planner": (
+        "Analyze the task and repository. Do not edit files. Produce the "
+        "smallest viable plan and only the required structured output."
+    ),
+    "builder": (
+        "Implement the approved plan in this Workspace. Do not merge or "
+        "push. Modify only planned files, then return the required report."
+    ),
+    "reviewer": (
+        "Review the candidate against the task, plan, and checks. Do not "
+        "edit files. Return only structured findings and disposition."
+    ),
+}
+
+
+def role_prompt(role: str, request: dict[str, Any]) -> str:
+    return (
+        f"You are the Agentflow {role} Agent Role.\n\n"
+        f"{ROLE_INSTRUCTIONS[role]}\n\n"
+        "Workflow context:\n"
+        + json.dumps(request, indent=2, sort_keys=True)
+    )
+
+
 class AgentAdapter(Protocol):
     name: str
 
@@ -78,26 +103,7 @@ class CodexAdapter:
         workspace: Path,
     ) -> dict[str, Any]:
         sandbox = "workspace-write" if role == "builder" else "read-only"
-        role_instruction = {
-            "planner": (
-                "Analyze the task and repository. Do not edit files. Produce the "
-                "smallest viable plan and only the required structured output."
-            ),
-            "builder": (
-                "Implement the approved plan in this Workspace. Do not merge or "
-                "push. Modify only planned files, then return the required report."
-            ),
-            "reviewer": (
-                "Review the candidate against the task, plan, and checks. Do not "
-                "edit files. Return only structured findings and disposition."
-            ),
-        }[role]
-        prompt = (
-            f"You are the Agentflow {role} Agent Role.\n\n"
-            f"{role_instruction}\n\n"
-            "Workflow context:\n"
-            + json.dumps(request, indent=2, sort_keys=True)
-        )
+        prompt = role_prompt(role, request)
         with tempfile.TemporaryDirectory(prefix="agentflow-codex-") as temp_dir:
             temp_path = Path(temp_dir)
             schema_path = temp_path / "output-schema.json"
@@ -135,3 +141,69 @@ class CodexAdapter:
                     f"Codex adapter failed for role {role}:\n{completed.stderr}"
                 )
             return json.loads(output_path.read_text(encoding="utf-8"))
+
+
+class ClaudeAdapter:
+    name = "claude"
+
+    _READ_ONLY_ARGUMENTS = [
+        "--tools",
+        "Read,Grep,Glob",
+        "--permission-mode",
+        "dontAsk",
+    ]
+    _ROLE_ARGUMENTS = {
+        "planner": _READ_ONLY_ARGUMENTS,
+        "builder": [
+            "--permission-mode",
+            "acceptEdits",
+            "--allowedTools",
+            "Bash",
+        ],
+        "reviewer": _READ_ONLY_ARGUMENTS,
+    }
+
+    def __init__(self, executable: str | None = None) -> None:
+        self._executable = executable or os.environ.get("AGENTFLOW_CLAUDE", "claude")
+
+    def invoke(
+        self,
+        *,
+        role: str,
+        request: dict[str, Any],
+        workspace: Path,
+    ) -> dict[str, Any]:
+        completed = subprocess.run(
+            [
+                self._executable,
+                "--print",
+                "--output-format",
+                "json",
+                "--json-schema",
+                json.dumps(contract_schema(role), sort_keys=True),
+                "--no-session-persistence",
+                *self._ROLE_ARGUMENTS[role],
+            ],
+            input=role_prompt(role, request),
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            timeout=3600,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"Claude adapter failed for role {role}:\n{completed.stderr}"
+            )
+        envelope = json.loads(completed.stdout)
+        if envelope.get("is_error") or envelope.get("subtype") != "success":
+            raise RuntimeError(
+                f"Claude adapter reported failure for role {role}:\n"
+                f"{envelope.get('result')}"
+            )
+        structured_output = envelope.get("structured_output")
+        if not isinstance(structured_output, dict):
+            raise RuntimeError(
+                f"Claude adapter returned no structured output for role {role}"
+            )
+        return structured_output

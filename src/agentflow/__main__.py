@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .agent_adapter import CodexAdapter, DeterministicFakeAdapter
+from .agent_adapter import ClaudeAdapter, CodexAdapter, DeterministicFakeAdapter
 from .project_setup import initialize_repository
 from .paths import agentflow_home
 from .repository_profile import create_repository_profile
@@ -31,7 +31,7 @@ def main() -> int:
     approve_parser.add_argument("--data-dir", type=Path)
     advance_parser = subcommands.add_parser("advance")
     advance_parser.add_argument("run_id")
-    advance_parser.add_argument("--adapter", choices=("codex", "fake"))
+    advance_parser.add_argument("--adapter", choices=("claude", "codex", "fake"))
     advance_parser.add_argument("--adapter-fixture", type=Path)
     advance_parser.add_argument("--data-dir", type=Path)
     run_parser = subcommands.add_parser("run")
@@ -131,6 +131,8 @@ def main() -> int:
             if args.adapter_fixture is None:
                 parser.error("--adapter-fixture is required for the fake adapter")
             adapter = DeterministicFakeAdapter(args.adapter_fixture)
+        elif args.adapter == "claude":
+            adapter = ClaudeAdapter()
         elif args.adapter == "codex":
             adapter = CodexAdapter()
         result = advance_run(

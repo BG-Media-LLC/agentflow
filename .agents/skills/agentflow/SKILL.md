@@ -46,14 +46,21 @@ Run Evidence defaults to Agentflow Home outside the target repository. Use
 `AGENTFLOW_HOME` or `--data-dir` only when the user, CI environment, or isolated
 test requires an override.
 
-Advance exactly one recorded stage at a time:
+Advance exactly one recorded stage at a time, selecting an installed Agent
+Adapter (`claude` or `codex`) for the stages that require one:
 
 ```bash
-agentflow advance <run-id> --adapter codex  # plan
-agentflow advance <run-id> --adapter codex  # build and commit candidate
-agentflow advance <run-id>                  # authoritative checks
-agentflow advance <run-id> --adapter codex  # read-only review
+agentflow advance <run-id> --adapter claude  # plan
+agentflow advance <run-id> --adapter claude  # build and commit candidate
+agentflow advance <run-id>                   # authoritative checks
+agentflow advance <run-id> --adapter claude  # read-only review
 ```
+
+If the current model provider has no Agent Adapter or its executable is not
+installed, do not bypass the workflow and do not fake stage evidence. Build,
+test, and land an adapter for that provider first — as Bootstrap Development
+when no working adapter exists to coordinate the change — and only then start
+or resume Runs with it.
 
 After every command, report the returned state and use `agentflow status` when
 resuming in a fresh process. Never edit a Run Workspace manually while claiming

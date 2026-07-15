@@ -677,6 +677,222 @@ output_path.write_text(json.dumps({
             self.assertEqual(json.loads(planned.stdout)["state"], "planned")
             self.assertTrue((data_dir / "runs" / run_id / "plan.json").is_file())
 
+    def test_claude_adapter_uses_structured_output_for_planner_role(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_claude = temp_path / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env python3
+import json
+import sys
+
+arguments = sys.argv[1:]
+
+
+def value(flag):
+    return arguments[arguments.index(flag) + 1]
+
+
+assert "--print" in arguments
+assert value("--output-format") == "json"
+assert value("--tools") == "Read,Grep,Glob"
+assert value("--permission-mode") == "dontAsk"
+assert "planner" in sys.stdin.read()
+json.loads(value("--json-schema"))
+print(json.dumps({
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "result": "planned",
+    "structured_output": {
+        "files_to_modify": ["README.md"],
+        "risks": [],
+        "steps": [{
+            "description": "Document the health endpoint",
+            "id": "P1",
+            "verification": "The authoritative checks pass"
+        }],
+        "summary": "Add a health endpoint"
+    }
+}))
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            environment = {
+                **os.environ,
+                "AGENTFLOW_CLAUDE": str(fake_claude),
+                "PYTHONPATH": str(PROJECT_ROOT / "src"),
+            }
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            self.assertEqual(json.loads(planned.stdout)["state"], "planned")
+            plan = json.loads(
+                (data_dir / "runs" / run_id / "plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(plan["files_to_modify"], ["README.md"])
+
+    def test_claude_adapter_builder_writes_only_inside_the_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+            fixture_path = temp_path / "adapter-fixture.json"
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "planner": {
+                            "files_to_modify": ["README.md"],
+                            "risks": [],
+                            "steps": [
+                                {
+                                    "description": "Document the health endpoint",
+                                    "id": "P1",
+                                    "verification": "The authoritative checks pass",
+                                }
+                            ],
+                            "summary": "Add a health endpoint",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            fake_claude = temp_path / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+
+arguments = sys.argv[1:]
+
+
+def value(flag):
+    return arguments[arguments.index(flag) + 1]
+
+
+assert value("--permission-mode") == "acceptEdits"
+assert value("--allowedTools") == "Bash"
+assert "builder" in sys.stdin.read()
+Path("README.md").write_text(
+    "# Target\\n\\nHealth endpoint documented.\\n", encoding="utf-8"
+)
+print(json.dumps({
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "result": "built",
+    "structured_output": {
+        "commands_run": [],
+        "files_changed": ["README.md"],
+        "steps_completed": ["P1"],
+        "unresolved_issues": []
+    }
+}))
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            environment = {**environment, "AGENTFLOW_CLAUDE": str(fake_claude)}
+
+            built = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertEqual(built.returncode, 0, built.stderr)
+            response = json.loads(built.stdout)
+            self.assertEqual(response["state"], "built")
+            self.assertEqual(len(response["candidate_sha"]), 40)
+            report = json.loads(
+                (data_dir / "runs" / run_id / "build-report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(report["files_changed"], ["README.md"])
+
+    def test_claude_adapter_rejects_error_envelope_without_changing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_claude = temp_path / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env python3
+import json
+
+print(json.dumps({
+    "type": "result",
+    "subtype": "error_during_execution",
+    "is_error": True,
+    "result": "the session failed before structured output"
+}))
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            environment = {
+                **os.environ,
+                "AGENTFLOW_CLAUDE": str(fake_claude),
+                "PYTHONPATH": str(PROJECT_ROOT / "src"),
+            }
+            _, data_dir, run_id = create_profiled_run(temp_path, environment)
+
+            planned = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertNotEqual(planned.returncode, 0)
+            self.assertIn("Claude adapter reported failure", planned.stderr)
+            status = agentflow(
+                "status",
+                run_id,
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(json.loads(status.stdout)["state"], "ready")
+            self.assertFalse((data_dir / "runs" / run_id / "plan.json").exists())
+
     def test_supervised_fake_flow_reaches_exact_candidate_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

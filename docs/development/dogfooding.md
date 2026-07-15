@@ -40,10 +40,10 @@ agentflow profile --check "python3 -m unittest discover -s tests -v"
 git add .agentflow/repository-profile.json
 git commit -m "Add Agentflow repository profile"
 agentflow start "<one small Agentflow improvement>"
-agentflow advance <run-id> --adapter codex
-agentflow advance <run-id> --adapter codex
+agentflow advance <run-id> --adapter claude
+agentflow advance <run-id> --adapter claude
 agentflow advance <run-id>
-agentflow advance <run-id> --adapter codex
+agentflow advance <run-id> --adapter claude
 agentflow status <run-id> # must report awaiting_human and candidate_sha
 ```
 
