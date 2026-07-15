@@ -7,8 +7,13 @@ remain in that repository.
 ## Read first
 
 - [`../CONTEXT.md`](../CONTEXT.md) — canonical domain language.
+- [`architecture/product-contract.md`](architecture/product-contract.md) —
+  canonical product and architecture contract, classifying every agreed
+  behavior as implemented or target.
 - [`architecture/run-kernel.md`](architecture/run-kernel.md) — implemented
   deterministic kernel and evidence layout.
+- [`decisions/agentflow-factory.md`](decisions/agentflow-factory.md) —
+  compact map of unresolved implementation choices.
 - [`development/dogfooding.md`](development/dogfooding.md) — self-hosting
   threshold and operating procedure.
 - [`roadmap.md`](roadmap.md) — dependency-ordered path from the kernel to a

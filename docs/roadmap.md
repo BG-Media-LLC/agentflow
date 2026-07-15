@@ -31,12 +31,14 @@ record and verify their outputs.
 - Bind approval to the exact candidate SHA.
 - Resume a Run from a fresh process.
 
-## Next: first supervised Self-Hosted Run
+## Completed: first supervised Self-Hosted Run
 
-- Use the committed Agentflow Repository Profile and installed Codex adapter.
-- Run one small Agentflow change through planner, builder, checks, and reviewer.
-- Stop at `awaiting_human` for exact candidate review and explicit approval.
-- Record gaps found during the Run as inputs to the next vertical slice.
+- Used the committed Agentflow Repository Profile and an installed adapter.
+- Ran one small Agentflow change through planner, builder, checks, and
+  reviewer as Run 1f8ac06da1d748d2abc4cde29d698d83.
+- Stopped at `awaiting_human`; the exact candidate was reviewed, explicitly
+  approved, and merged as 5c4c2961d57ee1a340402f3d0165b5085da82a8f.
+- Gaps found during the Run feed the next vertical slice.
 
 ## Next: adversarial verification
 

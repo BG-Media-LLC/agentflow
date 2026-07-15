@@ -4,14 +4,17 @@ Agentflow is dogfooding only during a Self-Hosted Run. Using Agentflow to create
 a Workspace and then manually performing an unavailable stage is Bootstrap
 Development and must be labeled as such.
 
-## Current level: first supervised self-hosting threshold
+## Current level: first supervised Self-Hosted Run completed
 
-Agentflow can now profile itself, invoke schema-constrained planner, builder,
-and reviewer roles through a provider adapter, enforce planned paths, commit a
+Agentflow can profile itself, invoke schema-constrained planner, builder, and
+reviewer roles through a provider adapter, enforce planned paths, commit a
 candidate, execute authoritative checks, replay state, and stop at a SHA-bound
 human approval gate. These capabilities were built through documented
-Bootstrap Development. The next small change will be the first supervised
-Self-Hosted Run.
+Bootstrap Development. The first supervised Self-Hosted Run has now completed:
+Run 1f8ac06da1d748d2abc4cde29d698d83 carried one small Agentflow change
+through planner, builder, checks, and reviewer, stopped at `awaiting_human`,
+and its approved candidate 5c4c2961d57ee1a340402f3d0165b5085da82a8f was merged
+manually after explicit approval.
 
 ## Minimum self-hosting threshold
 
