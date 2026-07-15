@@ -3,6 +3,9 @@
 This is the deterministic kernel of a reusable agentic engineering workflow
 engine. It intentionally contains no model SDK or remote orchestration service.
 
+See [`docs/README.md`](docs/README.md) for the architecture, domain decisions,
+dogfooding threshold, and dependency-ordered roadmap.
+
 ## Run the test
 
 ```bash

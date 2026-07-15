@@ -1,0 +1,63 @@
+# Dogfooding Agentflow
+
+Agentflow is dogfooding only during a Self-Hosted Run. Using Agentflow to create
+a Workspace and then manually performing an unavailable stage is Bootstrap
+Development and must be labeled as such.
+
+## Current level: deterministic kernel
+
+Agentflow can initialize itself, capture a Run, create an isolated Workspace,
+replay Run State, and record approval for an `awaiting_human` Run. It cannot yet
+plan, build, verify, or review its own changes. The kernel was therefore built
+through documented Bootstrap Development.
+
+## Minimum self-hosting threshold
+
+A first supervised Self-Hosted Run requires all of the following:
+
+- A target-local Repository Profile or repository map is available.
+- A planner Agent Role produces a schema-validated plan.
+- A builder Agent Role changes only the Run's Workspace.
+- Agent Adapters are selectable without changing workflow semantics.
+- An authoritative check command executes outside agent reasoning.
+- Check results become Run Evidence.
+- The workflow records `awaiting_human` only after checks pass.
+- Human approval is recorded by command and bound to the exact candidate SHA.
+- A fresh process can replay the Run and continue from the recorded state.
+
+Merge and deployment automation are not required for the first supervised
+Self-Hosted Run. They remain manual after approval until the Merge Agent and
+Post-Merge Verification exist.
+
+## Procedure once the threshold is met
+
+```bash
+cd /path/to/agentflow
+agentflow init
+agentflow start "<one small Agentflow improvement>"
+agentflow status <run-id>
+```
+
+The workflow—not the chat session—must then invoke the configured planner and
+builder, run authoritative checks, and stop at `awaiting_human`. The human
+reviews the exact diff and records approval with:
+
+```bash
+agentflow approve <run-id> --approved-by <identity>
+```
+
+If any required stage is performed manually, record that gap and classify the
+Run as Bootstrap Development.
+
+## Session continuity
+
+At the end of every development session:
+
+1. Update architecture docs when implemented behavior changes.
+2. Update `CONTEXT.md` when domain language changes.
+3. Add an ADR only for a hard-to-reverse, surprising trade-off.
+4. Update `docs/roadmap.md` with completed and next slices.
+5. Run the full test suite and skill validator.
+6. Commit and push a clean revision.
+7. Generate a temporary handoff that references these durable artifacts rather
+   than duplicating them.

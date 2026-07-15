@@ -16,13 +16,25 @@ A target-local, versioned description of a Target Repository's structure, author
 
 The immutable statement of work captured when a Run begins. It may originate from a GitHub Issue or a local task file, but later edits to the source do not alter an active Run.
 
+## Run
+
+One execution of an engineering workflow against a captured Task Spec and an exact Target Repository revision.
+
+## Run State
+
+The current lifecycle position of a Run, derived from its ordered Run Evidence rather than stored as a separately mutable value.
+
+## Workspace
+
+The isolated checkout assigned to one Run. A Workspace must not be shared by concurrent builders or treated as the Target Repository's primary checkout.
+
 ## Run Evidence
 
 Immutable records produced by a workflow run: artifacts, command results, approvals, and state-transition events. Run Evidence is the basis for verification and later learning.
 
 ## Artifact Store
 
-The replaceable storage interface for mutable Run Evidence and temporary workspaces. Its local adapter uses the operating system's standard application-data directory, outside both the Agentflow source repository and every Target Repository.
+The replaceable storage interface for persistent Run Evidence and temporary Workspaces. Its local adapter uses the operating system's standard application-data directory, outside both the Agentflow source repository and every Target Repository.
 
 ## Agentflow Home
 
@@ -59,3 +71,11 @@ Authoritative checks run against the resulting target-branch commit after a Merg
 ## Recovery Proposal
 
 A reviewable response to a failed Post-Merge Verification, such as a revert or forward fix. Agentflow may prepare it, but it requires human approval before execution.
+
+## Bootstrap Development
+
+Work used to create a workflow capability that Agentflow cannot yet coordinate itself. Bootstrap Development must not be presented as a completed Agentflow stage.
+
+## Self-Hosted Run
+
+A Run whose Target Repository is Agentflow and whose required stages are coordinated and evidenced by Agentflow itself. Manual work around an unavailable stage remains Bootstrap Development, not a Self-Hosted Run.
