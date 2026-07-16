@@ -12,12 +12,14 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 try:
     from tests.test_advance_command import (
+        advance_tester,
         agentflow,
         create_profiled_run,
         create_verified_run,
     )
 except ImportError:
     from test_advance_command import (
+        advance_tester,
         agentflow,
         create_profiled_run,
         create_verified_run,
@@ -346,6 +348,7 @@ class AmendPlanCommandTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
             data_dir, run_id = create_verified_run(temp_path, environment)
+            advance_tester(temp_path, data_dir, run_id, environment)
             fixture_path = temp_path / "adapter-fixture.json"
             fixture_path.write_text(
                 json.dumps(
@@ -482,6 +485,7 @@ class AmendPlanCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             data_dir, run_id = create_verified_run(temp_path, environment)
+            advance_tester(temp_path, data_dir, run_id, environment)
             fixture_path = temp_path / "adapter-fixture.json"
             fixture_path.write_text(
                 json.dumps({"reviewer": {"disposition": "approve", "findings": []}}),
