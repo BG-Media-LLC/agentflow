@@ -15,6 +15,7 @@ module.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -45,16 +46,21 @@ class WorkGraphBackend(Protocol):
 
 
 class InMemoryWorkGraphBackend:
-    """Full-replace in-memory Work Graph store."""
+    """Full-replace in-memory Work Graph store.
+
+    Deep-copies on read and write so nested fields such as ``depends_on`` and
+    ``acceptance_criteria`` stay isolated from callers, matching JSONL round-trip
+    isolation via serialization.
+    """
 
     def __init__(self, items: list[dict] | None = None) -> None:
-        self._items: list[dict] = [dict(item) for item in (items or [])]
+        self._items: list[dict] = [copy.deepcopy(item) for item in (items or [])]
 
     def read_items(self) -> list[dict]:
-        return [dict(item) for item in self._items]
+        return [copy.deepcopy(item) for item in self._items]
 
     def write_items(self, items: list[dict]) -> None:
-        self._items = [dict(item) for item in items]
+        self._items = [copy.deepcopy(item) for item in items]
 
 
 class JsonlWorkGraphBackend:
