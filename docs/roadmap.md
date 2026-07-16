@@ -1,164 +1,46 @@
 # Agentflow roadmap
 
-The roadmap is ordered by dependency. Each milestone must be a working vertical
-slice with executable acceptance tests; roles are added only when the kernel can
-record and verify their outputs.
-
 Agentflow's goal is to make model-produced changes trustworthy (see the
 [product contract](architecture/product-contract.md)). Work splits into a warm,
 interactive **Framing** half that produces an approved Work Graph and a cold,
-deterministic **Execution** half that builds and gates it. Because Execution is
-concurrent, the concurrency and evidence-integrity foundation is a prerequisite
-for the Work-Graph and reconciliation milestones below and is fixed first.
+deterministic **Execution** half that builds and gates it. Each milestone is a
+working vertical slice with executable acceptance tests; roles are added only
+when the kernel can record and verify their outputs, and the concurrency and
+evidence-integrity foundation is fixed before anything concurrent builds on it.
 
-## Completed: installation and deterministic kernel
+## Where things stand
 
-- Public one-command installer and global skill distribution.
-- Idempotent Target Repository initialization.
-- External Agentflow Home with environment and CLI overrides.
-- Task and repository revision capture.
-- Unique Git branch and Workspace per Run.
-- Append-only event evidence and state replay.
-- Explicit human approval transition.
-- Removal of fabricated plan and check evidence.
+The deterministic kernel is in place: immutable task and repository snapshots,
+isolated Git worktrees, append-only event evidence with replayed state,
+compare-and-append stage claims with lease recovery, authoritative checks run
+outside the model, and human approval bound to an exact candidate SHA. On top of
+it: the builder, tester, and reviewer roles with a Cursor/Claude/Codex/fake
+adapter boundary; the adversarial tester gate; Workspace-integrity enforcement
+(git hooks, `core.hooksPath`, ignored files); and the concurrency foundation
+(atomic sequenced append, claim-guarded approve, expired-lease guard).
 
-## Completed: first supervised self-hosting foundation
+The warm/cold seam is connected end to end: the `framing` skill composes the
+grill → document → decompose flow into an approved Work Graph; Work Items are
+git-tracked JSONL with ready work computed from dependencies; and
+`start --work-item` captures an item into a gated Run by id and content hash,
+with completion derived from Run Evidence. The cold planner and its file-list
+confinement have been retired in favor of framing (ADR 0005).
 
-- Discover or create a target-local Repository Profile.
-- Map important directories, entry points, authoritative commands, and existing
-  documentation without copying project knowledge into Agentflow.
-- Record the profile path, revision, and integrity metadata in Run Evidence.
-- Define freshness rules so stale maps are detected deterministically.
-- Define versioned schemas for plan and role reports.
-- Add planner and builder Agent Roles.
-- Add at least one provider-specific Agent Adapter and one deterministic fake.
-- Enforce allowed paths and one builder per Workspace.
-- Execute the Target Repository's authoritative check command outside agents.
-- Record candidate SHA, checks, and `awaiting_human` evidence.
-- Bind approval to the exact candidate SHA.
-- Resume a Run from a fresh process.
+## Remaining work is tracked as a Work Graph, not here
 
-## Completed: first supervised Self-Hosted Run
+Open work lives in Agentflow's own Work Graph under
+[`.agentflow/work/`](../.agentflow/work/), so "what's left" is *computed*, never
+a hand-maintained list that drifts from reality:
 
-- Used the committed Agentflow Repository Profile and an installed adapter.
-- Ran one small Agentflow change through planner, builder, checks, and
-  reviewer as Run 1f8ac06da1d748d2abc4cde29d698d83.
-- Stopped at `awaiting_human`; the exact candidate was reviewed, explicitly
-  approved, and merged as 5c4c2961d57ee1a340402f3d0165b5085da82a8f.
-- Gaps found during the Run feed the next vertical slice.
+```bash
+agentflow work list    # the whole graph, validated
+agentflow work ready   # the items actionable now (dependencies satisfied)
+```
 
-## Completed: kernel claims and run lifecycle operations
-
-- Compare-and-append stage claims in the Run's own event log, with lease
-  expiry, so exactly one process can claim and execute a stage.
-- Run enumeration across states without requiring a known run id.
-- Explicit abandon operation that appends a terminal event.
-- Bounded repair transitions out of `changes_requested` and explicit plan and
-  human rejection transitions, preserving all prior attempts as evidence.
-
-## Completed: task snapshot extension and check-evidence enrichment
-
-- Optional Task Spec `source` (`provider`, `work_item_id`, `captured_at`,
-  importer-supplied `content_hash`) and `acceptance_criteria`, with validation
-  that rejects unknown fields while keeping legacy summary-only snapshots
-  replayable.
-- `start --acceptance-criterion` and `run task.json` preserve criteria and
-  optional source; new Runs always store `acceptance_criteria` (empty allowed).
-- `status` exposes source and non-empty criteria only; `list` stays concise.
-- No snapshot refresh: material upstream task change requires a new Run.
-- Check records enriched with `started_at`, `duration_ms`, shared per-stage
-  `attempt`, and an allowlisted environment fingerprint only.
-
-## Retired: human plan amendment
-
-The `amend-plan` command and `plan_amended` events existed only to patch the
-cold planner's pre-declared `files_to_modify` list when it guessed wrong. With
-the planner and file-list confinement retired (below), amendment has no purpose
-and was removed; legacy `plan_amended` events remain replayable.
-
-## Completed: adversarial verification gate
-
-- Tester Agent Role that runs after authoritative checks pass and before review,
-  modifying only files under the profile's declared `test_paths` and never
-  production code, enforced by the kernel against the authoritative Git diff.
-- Repository Profile `--test-path` declaration; new `tests_ready`/`tests_failed`
-  events and `tested` state; the tester commit re-runs the authoritative checks
-  into `checks-<G>-post-tests.json`, and its prose findings are evidence surfaced
-  to the reviewer that never gate the workflow alone.
-
-## Completed: concurrency and evidence-integrity foundation
-
-- Sequence assignment and the append share one advisory lock, so racing writers
-  cannot collide on a sequence number and make a Run permanently unreplayable.
-- `approve` is claim-guarded and re-verifies the candidate under the claim, so a
-  concurrent rebase cannot bind approval to a stale revision.
-- A stage-result append is refused once another process has taken over an
-  expired claim; `list` isolates a single unreadable Run instead of failing
-  wholesale. (GitHub issue #1.)
-
-## In progress: framing and the warm/cold seam
-
-- **Done.** Work Item and Work Graph contracts (versioned; unique ids,
-  resolvable dependencies, no cycles) stored as git-tracked JSONL under
-  `.agentflow/work/`. Ready work computed from dependencies plus completion read
-  from Run Evidence (`agentflow work list` / `work ready`).
-- **Done.** An Agentflow-owned `framing` skill that runs warm in the operator's
-  session, composing the Matt Pocock skills (grill-with-docs → to-prd/to-spec →
-  to-tickets) into an approved Work Graph. See ADR 0005.
-- **Done.** The cold planner stage is retired (GitHub issue #4): a Run advances
-  `ready → built` by invoking the builder against the Task Spec, and builder
-  confinement is self-consistency (reported files equal the authoritative diff)
-  rather than a pre-declared file list — trust rests on checks, the tester, the
-  reviewer, and human approval.
-- **Done.** Capture an approved Work Item into a Run's Task Spec by id and
-  content hash (GitHub issue #5): `start --work-item <id>`.
-- **Next.** Auto-dispatch ready Work Items into gated Runs — a single-pass
-  reconcile that turns the operator-driven `work ready` → `start --work-item`
-  loop into one command, recording every decision as an event and stopping at
-  every human gate.
-- **Next.** Spec-approval gate as recorded evidence, distinct from candidate
-  approval.
-
-## Completed: Workspace enforcement hardening
-
-- Closed the enforcement blind spots to `.git` internals, `core.hooksPath`, and
-  `.gitignore`d files (GitHub issue #2): a Workspace-integrity guard runs before
-  and after every builder, tester, and reviewer invocation, so a read-only
-  reviewer cannot plant a hook to escape its sandbox and a builder/tester cannot
-  pass checks against state that never enters the candidate.
-
-## Later: adversarial verification hardening
-
-- Harden the existing read-only reviewer with evaluation fixtures.
-- Bounded builder-fix retry loop from `tests_failed`.
-- Evaluation fixtures and regression evidence for role and prompt changes.
-
-## Later: work graph reconciliation and discoveries
-
-- Single-pass reconciliation that computes ready work, dispatches Runs, records
-  every decision as an event, and stops at every human gate.
-- Structured Discoveries in role output contracts, applied to the Work Graph
-  only through deterministic validation.
-- A replaceable Work-Graph backend interface behind the native JSONL store.
-
-## Later: read-only observability projections
-
-- A projection over Run Evidence and the Work Graph, rebuildable from events
-  at any time and never an authority.
-- Read-only views of runs, work, and evidence; mutation surfaces are deferred
-  until approval identity is authenticated.
-
-## Later: merge and shipping
-
-- Constrained Merge Agent operating only on an Approved Revision.
-- Clean-environment CI gate and protected-branch policy checks.
-- Post-Merge Verification and human-reviewed Recovery Proposals.
-- Deployment adapters after merge safety is demonstrated.
-
-## Later: evidence-driven improvement
-
-- Generate Improvement Proposals from repeated Run Evidence.
-- Evaluate proposals against fixed fixtures and historical failures.
-- Require an Adoption Gate before changing skills, Repository Profiles, role
-  prompts, or workflow defaults.
-- Compare upstream skill changes and selectively adopt useful revisions.
+A slice is closed by editing its Work Item out of the graph in the same commit
+that ships it; git history is the completion record. The dependency edges in the
+graph encode the ordering that used to be prose here — for example merge and
+shipping work (`merge-agent`, `ci-gate`, `post-merge-verification`,
+`deployment-adapters`) is gated behind the Merge Agent, and evidence-driven
+improvement (`improvement-proposals`, `adoption-gate`) behind the observability
+projection. This document keeps only the narrative; the status is the graph.
