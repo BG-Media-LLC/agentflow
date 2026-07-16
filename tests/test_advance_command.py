@@ -10,6 +10,7 @@ import unittest
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 
 def agentflow(
@@ -1664,7 +1665,16 @@ raise SystemExit(7)
             tests_failed = advance_tester(
                 temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
             )
-            self.assertEqual(json.loads(tests_failed.stdout)["state"], "tests_failed")
+            failed_response = json.loads(tests_failed.stdout)
+            self.assertEqual(failed_response["state"], "tests_failed")
+            failed_sha = failed_response["candidate_sha"]
+            prior_checks = (run_dir / "checks-1.json").read_text(encoding="utf-8")
+            prior_post = (run_dir / "checks-1-post-tests.json").read_text(
+                encoding="utf-8"
+            )
+            prior_tester = (run_dir / "tester-report-1.json").read_text(
+                encoding="utf-8"
+            )
 
             fixture_path = temp_path / "adapter-fixture.json"
             fixture_path.write_text(
@@ -1683,7 +1693,12 @@ raise SystemExit(7)
                 environment=environment,
             )
             self.assertEqual(repaired.returncode, 0, repaired.stderr)
-            self.assertEqual(json.loads(repaired.stdout)["state"], "built")
+            repaired_response = json.loads(repaired.stdout)
+            self.assertEqual(repaired_response["state"], "built")
+            repair_sha = repaired_response["candidate_sha"]
+            # A repair must commit a new candidate — re-entering built on the
+            # same SHA would skip the mandatory re-verification contract.
+            self.assertNotEqual(repair_sha, failed_sha)
             self.assertTrue((run_dir / "repair-report-1.json").is_file())
             repair_ready = next(
                 event
@@ -1691,8 +1706,9 @@ raise SystemExit(7)
                 if event["type"] == "repair_ready"
             )
             self.assertEqual(repair_ready["repair_attempt"], 1)
+            self.assertEqual(repair_ready["candidate_sha"], repair_sha)
 
-            # Checks rerun against the repaired candidate.
+            # Checks rerun against the repaired candidate at generation 2.
             rechecked = agentflow(
                 "advance",
                 run_id,
@@ -1702,13 +1718,31 @@ raise SystemExit(7)
                 environment=environment,
             )
             self.assertEqual(rechecked.returncode, 0, rechecked.stderr)
-            self.assertEqual(json.loads(rechecked.stdout)["state"], "verified")
+            rechecked_response = json.loads(rechecked.stdout)
+            self.assertEqual(rechecked_response["state"], "verified")
+            self.assertEqual(rechecked_response["candidate_sha"], repair_sha)
+            checks_2 = json.loads(
+                (run_dir / "checks-2.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(checks_2["candidate_sha"], repair_sha)
+            self.assertEqual(
+                (run_dir / "checks-1.json").read_text(encoding="utf-8"), prior_checks
+            )
+            self.assertEqual(
+                (run_dir / "checks-1-post-tests.json").read_text(encoding="utf-8"),
+                prior_post,
+            )
 
-            # The tester reruns.
+            # The tester reruns at the new generation without clobbering evidence.
             retested = advance_tester(temp_path, data_dir, run_id, environment)
             self.assertEqual(json.loads(retested.stdout)["state"], "tested")
+            self.assertEqual(
+                (run_dir / "tester-report-1.json").read_text(encoding="utf-8"),
+                prior_tester,
+            )
+            self.assertTrue((run_dir / "tester-report-2.json").is_file())
 
-            # Review reruns and reaches the human gate.
+            # Review reruns and reaches the human gate on a distinct artifact.
             fixture_path.write_text(
                 json.dumps({"reviewer": {"disposition": "approve", "findings": []}}),
                 encoding="utf-8",
@@ -1727,6 +1761,8 @@ raise SystemExit(7)
             )
             self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
             self.assertEqual(json.loads(reviewed.stdout)["state"], "awaiting_human")
+            self.assertTrue((run_dir / "review-2.json").is_file())
+            self.assertFalse((run_dir / "review-1.json").exists())
 
     def test_tests_failed_repair_exhaustion_without_third_model_invoke(
         self,
@@ -1745,7 +1781,7 @@ raise SystemExit(7)
             )
             self.assertEqual(json.loads(tests_failed.stdout)["state"], "tests_failed")
 
-            for _ in (1, 2):
+            for attempt in (1, 2):
                 fixture_path.write_text(
                     json.dumps(BUILDER_TEST_REPAIR_FIXTURE), encoding="utf-8"
                 )
@@ -1763,6 +1799,12 @@ raise SystemExit(7)
                 )
                 self.assertEqual(repaired.returncode, 0, repaired.stderr)
                 self.assertEqual(json.loads(repaired.stdout)["state"], "built")
+                repair_ready = next(
+                    event
+                    for event in reversed(_events(data_dir, run_id))
+                    if event["type"] == "repair_ready"
+                )
+                self.assertEqual(repair_ready["repair_attempt"], attempt)
                 self.assertEqual(
                     agentflow(
                         "advance",
@@ -1779,28 +1821,8 @@ raise SystemExit(7)
                 )
                 self.assertEqual(json.loads(blocked.stdout)["state"], "tests_failed")
 
-            # The budget is spent: the next advance must fail terminally without
-            # invoking a model, leaving the Workspace untouched.
-            fixture_path.write_text(
-                json.dumps(
-                    {
-                        "builder": {
-                            "output": {
-                                "commands_run": ["should-not-run"],
-                                "files_changed": ["tests/test_regression.py"],
-                                "steps_completed": ["P1"],
-                                "unresolved_issues": [],
-                            },
-                            "writes": {
-                                "tests/test_regression.py": (
-                                    "print('should not be written')\n"
-                                )
-                            },
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
+            # The budget is spent: advance with NO adapter must still terminate.
+            # Requiring a model here would violate "without invoking a model".
             worktree = Path(
                 json.loads(
                     agentflow(
@@ -1819,10 +1841,6 @@ raise SystemExit(7)
             exhausted = agentflow(
                 "advance",
                 run_id,
-                "--adapter",
-                "fake",
-                "--adapter-fixture",
-                str(fixture_path),
                 "--data-dir",
                 str(data_dir),
                 cwd=temp_path,
@@ -1834,9 +1852,17 @@ raise SystemExit(7)
             self.assertEqual(
                 sum(1 for event in events if event["type"] == "repair_ready"), 2
             )
-            self.assertTrue(
-                any(event["type"] == "repair_exhausted" for event in events)
+            exhausted_event = next(
+                event for event in events if event["type"] == "repair_exhausted"
             )
+            self.assertEqual(
+                Path(exhausted_event["artifact"]).name, "repair-exhausted.json"
+            )
+            exhausted_report = json.loads(
+                (run_dir / "repair-exhausted.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(exhausted_report["max_repair_attempts"], 2)
+            self.assertEqual(exhausted_report["repair_ready_count"], 2)
             self.assertFalse((run_dir / "repair-report-3.json").exists())
             self.assertEqual(
                 (worktree / "tests" / "test_regression.py").read_text(
@@ -1844,7 +1870,17 @@ raise SystemExit(7)
                 ),
                 before,
             )
-            self.assertNotIn("should not be written", before)
+            # Terminal: a further advance must refuse rather than repair again.
+            refused = agentflow(
+                "advance",
+                run_id,
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("cannot advance from state failed", refused.stderr)
 
     def test_tests_failed_repair_builder_receives_failing_checks_and_findings(
         self,
@@ -1913,6 +1949,229 @@ raise SystemExit(7)
             self.assertTrue(
                 any(check["returncode"] != 0 for check in recorded_checks),
                 recorded_checks,
+            )
+
+    def test_tests_failed_second_repair_binds_latest_failing_evidence(self) -> None:
+        # After a first repair still lands in tests_failed, the second repair
+        # must bind repair_attempt=2 and the LATEST failing post-tests checks —
+        # not the generation-1 artifact from the first failure.
+        from agentflow.workflow import advance_run
+
+        class CapturingBuilder:
+            name = "fake"
+
+            def __init__(self) -> None:
+                self.requests: list[dict] = []
+
+            def invoke(self, *, role, request, workspace, transcript_path=None):
+                self.requests.append({"role": role, "request": dict(request)})
+                (workspace / "tests" / "test_regression.py").write_text(
+                    "print('regression fixed')\n", encoding="utf-8"
+                )
+                return {
+                    "commands_run": [],
+                    "files_changed": ["tests/test_regression.py"],
+                    "steps_completed": ["P1"],
+                    "unresolved_issues": [],
+                }
+
+        second_failing = {
+            "tester": {
+                "output": {
+                    "summary": "Still failing after first repair.",
+                    "files_changed": ["tests/test_regression.py"],
+                    "findings": [
+                        {
+                            "file": "tests/test_regression.py",
+                            "message": "Second-generation regression still open",
+                            "severity": "blocker",
+                        }
+                    ],
+                },
+                "writes": {"tests/test_regression.py": "raise SystemExit(2)\n"},
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(
+                temp_path, environment, TEST_RUNNING_CHECK
+            )
+            run_dir = data_dir / "runs" / run_id
+            fixture_path = temp_path / "adapter-fixture.json"
+
+            self.assertEqual(
+                json.loads(
+                    advance_tester(
+                        temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
+                    ).stdout
+                )["state"],
+                "tests_failed",
+            )
+            first_post = json.loads(
+                (run_dir / "checks-1-post-tests.json").read_text(encoding="utf-8")
+            )
+
+            fixture_path.write_text(
+                json.dumps(BUILDER_TEST_REPAIR_FIXTURE), encoding="utf-8"
+            )
+            self.assertEqual(
+                json.loads(
+                    agentflow(
+                        "advance",
+                        run_id,
+                        "--adapter",
+                        "fake",
+                        "--adapter-fixture",
+                        str(fixture_path),
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).stdout
+                )["state"],
+                "built",
+            )
+            self.assertEqual(
+                json.loads(
+                    agentflow(
+                        "advance",
+                        run_id,
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).stdout
+                )["state"],
+                "verified",
+            )
+            self.assertEqual(
+                json.loads(
+                    advance_tester(
+                        temp_path, data_dir, run_id, environment, second_failing
+                    ).stdout
+                )["state"],
+                "tests_failed",
+            )
+            latest_post = json.loads(
+                (run_dir / "checks-2-post-tests.json").read_text(encoding="utf-8")
+            )
+            self.assertNotEqual(latest_post["candidate_sha"], first_post["candidate_sha"])
+            self.assertTrue(
+                any(check["returncode"] != 0 for check in latest_post["checks"])
+            )
+
+            adapter = CapturingBuilder()
+            repaired = advance_run(run_id=run_id, data_dir=data_dir, adapter=adapter)
+            self.assertEqual(repaired.state, "built")
+            self.assertEqual(len(adapter.requests), 1)
+            request = adapter.requests[0]["request"]
+            self.assertEqual(request["repair_attempt"], 2)
+            self.assertEqual(
+                request["tester_findings"],
+                second_failing["tester"]["output"]["findings"],
+            )
+            self.assertEqual(
+                request["checks"]["candidate_sha"], latest_post["candidate_sha"]
+            )
+            self.assertNotEqual(
+                request["checks"]["candidate_sha"], first_post["candidate_sha"]
+            )
+
+    def test_tests_failed_exhaustion_skips_trigger_evidence_and_adapter(
+        self,
+    ) -> None:
+        # builder_request_extra must not run on exhaustion: deleting the
+        # failing-checks artifact and advancing with a raising adapter must
+        # still append repair_exhausted without invoking a model.
+        from agentflow.workflow import advance_run
+
+        class RaisingAdapter:
+            name = "fake"
+
+            def invoke(self, *, role, request, workspace, transcript_path=None):
+                raise AssertionError("exhaustion must not invoke a model")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(
+                temp_path, environment, TEST_RUNNING_CHECK
+            )
+            run_dir = data_dir / "runs" / run_id
+            fixture_path = temp_path / "adapter-fixture.json"
+
+            self.assertEqual(
+                json.loads(
+                    advance_tester(
+                        temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
+                    ).stdout
+                )["state"],
+                "tests_failed",
+            )
+            for _ in (1, 2):
+                fixture_path.write_text(
+                    json.dumps(BUILDER_TEST_REPAIR_FIXTURE), encoding="utf-8"
+                )
+                self.assertEqual(
+                    json.loads(
+                        agentflow(
+                            "advance",
+                            run_id,
+                            "--adapter",
+                            "fake",
+                            "--adapter-fixture",
+                            str(fixture_path),
+                            "--data-dir",
+                            str(data_dir),
+                            cwd=temp_path,
+                            environment=environment,
+                        ).stdout
+                    )["state"],
+                    "built",
+                )
+                self.assertEqual(
+                    agentflow(
+                        "advance",
+                        run_id,
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).returncode,
+                    0,
+                )
+                self.assertEqual(
+                    json.loads(
+                        advance_tester(
+                            temp_path,
+                            data_dir,
+                            run_id,
+                            environment,
+                            TESTER_FAILING_FIXTURE,
+                        ).stdout
+                    )["state"],
+                    "tests_failed",
+                )
+
+            latest_failed = next(
+                event
+                for event in reversed(_events(data_dir, run_id))
+                if event["type"] == "tests_failed"
+            )
+            Path(latest_failed["checks_artifact"]).unlink()
+
+            exhausted = advance_run(
+                run_id=run_id, data_dir=data_dir, adapter=RaisingAdapter()
+            )
+            self.assertEqual(exhausted.state, "failed")
+            self.assertTrue((run_dir / "repair-exhausted.json").is_file())
+            self.assertTrue(
+                any(
+                    event["type"] == "repair_exhausted"
+                    for event in _events(data_dir, run_id)
+                )
             )
 
     def test_repair_budget_is_shared_across_review_and_tester_triggers(self) -> None:
@@ -2067,6 +2326,122 @@ raise SystemExit(7)
                 before,
             )
             self.assertNotIn("should not run", before)
+
+    def test_repair_budget_shared_tester_then_review_exhausts(self) -> None:
+        # Mirror of the shared-budget test in the opposite trigger order: a
+        # tests_failed repair then a changes_requested repair must exhaust the
+        # shared allowance so a further review-triggered advance is terminal.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(
+                temp_path, environment, TEST_RUNNING_CHECK
+            )
+            run_dir = data_dir / "runs" / run_id
+            fixture_path = temp_path / "adapter-fixture.json"
+
+            def advance_with(fixture: dict) -> subprocess.CompletedProcess[str]:
+                fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+                return agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                )
+
+            def advance_checks() -> subprocess.CompletedProcess[str]:
+                return agentflow(
+                    "advance",
+                    run_id,
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                )
+
+            request_changes = {
+                "reviewer": {
+                    "disposition": "changes_requested",
+                    "findings": [
+                        {
+                            "file": "README.md",
+                            "message": "Needs clearer docs",
+                            "severity": "major",
+                        }
+                    ],
+                }
+            }
+            readme_repair = {
+                "builder": {
+                    "output": {
+                        "commands_run": [],
+                        "files_changed": ["README.md"],
+                        "steps_completed": ["P1"],
+                        "unresolved_issues": [],
+                    },
+                    "writes": {"README.md": "# Target\n\nReview repair.\n"},
+                }
+            }
+
+            # Repair #1 from tests_failed.
+            self.assertEqual(
+                json.loads(
+                    advance_tester(
+                        temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
+                    ).stdout
+                )["state"],
+                "tests_failed",
+            )
+            self.assertEqual(
+                json.loads(advance_with(BUILDER_TEST_REPAIR_FIXTURE).stdout)["state"],
+                "built",
+            )
+            self.assertEqual(json.loads(advance_checks().stdout)["state"], "verified")
+            self.assertEqual(
+                json.loads(advance_tester(temp_path, data_dir, run_id, environment).stdout)[
+                    "state"
+                ],
+                "tested",
+            )
+
+            # Repair #2 from changes_requested.
+            self.assertEqual(
+                json.loads(advance_with(request_changes).stdout)["state"],
+                "changes_requested",
+            )
+            self.assertEqual(
+                json.loads(advance_with(readme_repair).stdout)["state"], "built"
+            )
+            self.assertEqual(json.loads(advance_checks().stdout)["state"], "verified")
+            self.assertEqual(
+                json.loads(advance_tester(temp_path, data_dir, run_id, environment).stdout)[
+                    "state"
+                ],
+                "tested",
+            )
+            self.assertEqual(
+                json.loads(advance_with(request_changes).stdout)["state"],
+                "changes_requested",
+            )
+
+            # Shared budget spent: advance without an adapter must still exhaust.
+            exhausted = advance_checks()
+            self.assertEqual(exhausted.returncode, 0, exhausted.stderr)
+            self.assertEqual(json.loads(exhausted.stdout)["state"], "failed")
+            events = _events(data_dir, run_id)
+            self.assertEqual(
+                sum(1 for event in events if event["type"] == "repair_ready"), 2
+            )
+            self.assertTrue(
+                any(event["type"] == "repair_exhausted" for event in events)
+            )
+            self.assertFalse((run_dir / "repair-report-3.json").exists())
 
     def test_tester_change_outside_test_paths_fails_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
