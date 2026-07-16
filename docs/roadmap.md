@@ -110,17 +110,22 @@ and was removed; legacy `plan_amended` events remain replayable.
   confinement is self-consistency (reported files equal the authoritative diff)
   rather than a pre-declared file list — trust rests on checks, the tester, the
   reviewer, and human approval.
-- **Next.** Capture an approved Work Item into a Run's Task Spec by id and
-  content hash, and auto-dispatch ready Work Items into gated Runs.
+- **Done.** Capture an approved Work Item into a Run's Task Spec by id and
+  content hash (GitHub issue #5): `start --work-item <id>`.
+- **Next.** Auto-dispatch ready Work Items into gated Runs — a single-pass
+  reconcile that turns the operator-driven `work ready` → `start --work-item`
+  loop into one command, recording every decision as an event and stopping at
+  every human gate.
 - **Next.** Spec-approval gate as recorded evidence, distinct from candidate
   approval.
 
-## Later: Workspace enforcement hardening
+## Completed: Workspace enforcement hardening
 
-- Close the enforcement blind spots to `.git` internals, `core.hooksPath`, and
-  `.gitignore`d files so a read-only reviewer cannot escape its sandbox and a
-  builder/tester cannot pass checks against state that never enters the
-  candidate. (Audit finding #3.)
+- Closed the enforcement blind spots to `.git` internals, `core.hooksPath`, and
+  `.gitignore`d files (GitHub issue #2): a Workspace-integrity guard runs before
+  and after every builder, tester, and reviewer invocation, so a read-only
+  reviewer cannot plant a hook to escape its sandbox and a builder/tester cannot
+  pass checks against state that never enters the candidate.
 
 ## Later: adversarial verification hardening
 
@@ -128,16 +133,13 @@ and was removed; legacy `plan_amended` events remain replayable.
 - Bounded builder-fix retry loop from `tests_failed`.
 - Evaluation fixtures and regression evidence for role and prompt changes.
 
-## Later: target-repository work graph and reconciliation
+## Later: work graph reconciliation and discoveries
 
-- Work Items as git-tracked JSONL owned by the Target Repository under
-  `.agentflow/work/`, behind a replaceable backend interface.
-- Ready-work computation from typed dependency relationships rather than
-  stored status.
+- Single-pass reconciliation that computes ready work, dispatches Runs, records
+  every decision as an event, and stops at every human gate.
 - Structured Discoveries in role output contracts, applied to the Work Graph
   only through deterministic validation.
-- Single-pass reconciliation that records every decision as an event and
-  stops at every human gate.
+- A replaceable Work-Graph backend interface behind the native JSONL store.
 
 ## Later: read-only observability projections
 
