@@ -80,6 +80,83 @@ def _changed_files(workspace: Path) -> list[str]:
     return sorted(changed)
 
 
+def _git_optional(*args: str, cwd: Path) -> str:
+    """Run a git command that may legitimately exit nonzero, returning stdout.
+
+    Used for reads like ``config --get`` where an unset key exits 1 rather than
+    signalling an error.
+    """
+    completed = subprocess.run(
+        ["git", *args], cwd=cwd, text=True, capture_output=True, check=False
+    )
+    return completed.stdout.strip()
+
+
+def _capture_workspace_guard(workspace: Path) -> dict:
+    """Fingerprint the parts of a Workspace that ``git status`` cannot see.
+
+    Covers the two enforcement blind spots: git hooks (which execute at the next
+    in-Workspace commit, so a planted hook is arbitrary code execution) and
+    ignored files (which affect the authoritative checks yet never enter the
+    committed candidate). The resolved hooks directory is read via
+    ``rev-parse --git-path hooks`` so it is correct for both plain checkouts and
+    Git worktrees, and ``core.hooksPath`` is captured explicitly so repointing it
+    is detected even before the new directory has any content.
+    """
+    hooks_dir_raw = _git("rev-parse", "--git-path", "hooks", cwd=workspace)
+    hooks_dir = Path(hooks_dir_raw)
+    if not hooks_dir.is_absolute():
+        hooks_dir = (workspace / hooks_dir).resolve()
+    hook_files: dict[str, str] = {}
+    if hooks_dir.is_dir():
+        for path in sorted(hooks_dir.rglob("*")):
+            if path.is_file():
+                hook_files[str(path.relative_to(hooks_dir))] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+    ignored = sorted(
+        line[3:]
+        for line in _git(
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored=matching",
+            cwd=workspace,
+        ).splitlines()
+        if line.startswith("!!")
+    )
+    return {
+        "hooks_dir": str(hooks_dir),
+        "hooks_path_config": _git_optional(
+            "config", "--get", "core.hooksPath", cwd=workspace
+        ),
+        "hook_files": hook_files,
+        "ignored": ignored,
+    }
+
+
+def _assert_workspace_guard(workspace: Path, before: dict) -> None:
+    """Fail the stage if git hooks, ``core.hooksPath``, or ignored files changed.
+
+    Applies to every enforcement point (builder, tester, reviewer): no Agent
+    Role may alter git-hook execution or leave ignored state that could sway the
+    authoritative checks without entering the candidate.
+    """
+    after = _capture_workspace_guard(workspace)
+    if after["hook_files"] != before["hook_files"] or (
+        after["hooks_dir"] != before["hooks_dir"]
+        or after["hooks_path_config"] != before["hooks_path_config"]
+    ):
+        raise ValueError(
+            "Workspace git hooks or core.hooksPath changed during the stage"
+        )
+    introduced = sorted(set(after["ignored"]) - set(before["ignored"]))
+    if introduced:
+        raise ValueError(
+            f"stage introduced ignored files not in the candidate: {introduced}"
+        )
+
+
 def _read_events(run_dir: Path) -> list[dict]:
     return [
         json.loads(line)
@@ -463,6 +540,7 @@ def _advance_claimed_run(
         # checks-<G>-post-tests.json without overwriting checks-<G>.json.
         generation = _candidate_generation(events)
         transcript_path = run_dir / f"tester-{generation}-transcript.jsonl"
+        workspace_guard = _capture_workspace_guard(workspace)
         report = validate_tester_report(
             adapter.invoke(
                 role="tester",
@@ -481,6 +559,7 @@ def _advance_claimed_run(
                 transcript_path=transcript_path,
             )
         )
+        _assert_workspace_guard(workspace, workspace_guard)
         changed_files = _enforce_tester_report(
             report=report, workspace=workspace, test_paths=test_paths
         )
@@ -607,6 +686,7 @@ def _advance_claimed_run(
         )
         if before_head != candidate_sha or before_status:
             raise ValueError("tested Workspace is not clean at the candidate SHA")
+        workspace_guard = _capture_workspace_guard(workspace)
         generation = _candidate_generation(events)
         tester_report_path = _artifact_path(
             run_dir, tests_event, f"tester-report-{generation}.json"
@@ -634,6 +714,7 @@ def _advance_claimed_run(
         )
         if after_head != before_head or after_status != before_status:
             raise ValueError("reviewer modified the read-only Workspace")
+        _assert_workspace_guard(workspace, workspace_guard)
         artifact = run_dir / f"review-{generation}.json"
         artifact.write_text(
             json.dumps(review, indent=2, sort_keys=True) + "\n",
@@ -725,6 +806,7 @@ def _advance_claimed_run(
         review_path = _artifact_path(run_dir, review_event, "review.json")
         review = json.loads(review_path.read_text(encoding="utf-8"))
         transcript_path = run_dir / f"builder-repair-{repair_attempt}-transcript.jsonl"
+        workspace_guard = _capture_workspace_guard(workspace)
         report = validate_builder_report(
             adapter.invoke(
                 role="builder",
@@ -740,6 +822,7 @@ def _advance_claimed_run(
                 transcript_path=transcript_path,
             )
         )
+        _assert_workspace_guard(workspace, workspace_guard)
         _enforce_builder_report(plan=plan, report=report, workspace=workspace)
         artifact = run_dir / f"repair-report-{repair_attempt}.json"
         artifact.write_text(
@@ -779,6 +862,7 @@ def _advance_claimed_run(
     events = _read_events(run_dir)
     generation = _candidate_generation(events) + 1
     transcript_path = run_dir / f"builder-{generation}-transcript.jsonl"
+    workspace_guard = _capture_workspace_guard(workspace)
     report = validate_builder_report(
         adapter.invoke(
             role="builder",
@@ -787,6 +871,7 @@ def _advance_claimed_run(
             transcript_path=transcript_path,
         )
     )
+    _assert_workspace_guard(workspace, workspace_guard)
     _enforce_builder_report(plan=plan, report=report, workspace=workspace)
     artifact = run_dir / f"build-report-{generation}.json"
     artifact.write_text(

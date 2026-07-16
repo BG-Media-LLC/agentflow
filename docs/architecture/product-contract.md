@@ -71,6 +71,14 @@ Every behavior statement carries one of three classifications:
   subset of planned paths and must equal its reported file list, and the tester's
   authoritative Git diff must equal its reported file list and stay at or under
   the profile's declared `test_paths`.
+- **Implemented.** Workspace integrity is enforced beyond the tracked-file diff:
+  across every builder, tester, and reviewer invocation the git-hook state
+  (contents of the resolved hooks directory plus the effective `core.hooksPath`)
+  must be unchanged, and no ignored files may be introduced. This closes the
+  escape in which a role plants a hook that would execute at the next
+  in-Workspace commit, or leaves `.gitignore`d state that sways the authoritative
+  checks without entering the committed candidate. The read-only reviewer
+  additionally must leave Workspace HEAD and status unchanged.
 - **Implemented.** A fresh process can replay a Run's events and continue from
   the recorded state.
 - **Implemented.** Runs are enumerable: `list` projects every Run in Agentflow
