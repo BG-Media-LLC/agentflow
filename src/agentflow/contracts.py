@@ -207,6 +207,17 @@ def contract_schema(role: str) -> dict[str, Any]:
                 "unresolved_issues",
             )
         }
+        # A non-empty list fails the stage gate; keep this description in the
+        # schema so adapters that pass --json-schema surface it to the model.
+        fields["unresolved_issues"] = {
+            "items": {"type": "string"},
+            "type": "array",
+            "description": (
+                "Must be empty unless an acceptance criterion remains unmet. "
+                "Do not list minor notes, follow-ups, or out-of-scope items; "
+                "a non-empty list fails the stage."
+            ),
+        }
         return {
             "additionalProperties": False,
             "properties": fields,

@@ -24,7 +24,10 @@ ROLE_INSTRUCTIONS = {
         "change uncommitted so Agentflow can create the candidate commit. "
         "Change only what the work requires and return the required report; "
         "the report's files_changed must match exactly what you changed "
-        "(the authoritative git status of this Workspace)."
+        "(the authoritative git status of this Workspace). "
+        "unresolved_issues must be an empty list unless an acceptance "
+        "criterion remains unmet; never put minor notes, follow-ups, or "
+        "out-of-scope items there — a non-empty list fails the stage."
     ),
     "reviewer": (
         "Review the candidate against the task, acceptance criteria, and "
