@@ -55,22 +55,21 @@ def read_state(
     return json.loads(status.stdout)["state"]
 
 
-def write_planner_fixture(temp_path: Path) -> Path:
+def write_builder_fixture(temp_path: Path) -> Path:
     fixture_path = temp_path / "adapter-fixture.json"
     fixture_path.write_text(
         json.dumps(
             {
-                "planner": {
-                    "files_to_modify": ["README.md"],
-                    "risks": [],
-                    "steps": [
-                        {
-                            "description": "Document the health endpoint",
-                            "id": "P1",
-                            "verification": "The authoritative checks pass",
-                        }
-                    ],
-                    "summary": "Add a health endpoint",
+                "builder": {
+                    "output": {
+                        "commands_run": [],
+                        "files_changed": ["README.md"],
+                        "steps_completed": ["P1"],
+                        "unresolved_issues": [],
+                    },
+                    "writes": {
+                        "README.md": "# Target\n\nHealth endpoint documented.\n"
+                    },
                 }
             }
         ),
@@ -145,7 +144,7 @@ class AbandonCommandTests(unittest.TestCase):
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
             abandoned = abandon(temp_path, data_dir, run_id, environment)
             self.assertEqual(abandoned.returncode, 0, abandoned.stderr)
-            fixture_path = write_planner_fixture(temp_path)
+            fixture_path = write_builder_fixture(temp_path)
 
             advanced = agentflow(
                 "advance",

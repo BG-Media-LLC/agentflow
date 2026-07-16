@@ -20,7 +20,6 @@ agentflow watch <run-id>
 agentflow list [--state <state>]
 agentflow approve <run-id> --approved-by <human identity>
 agentflow reject <run-id> --rejected-by <human identity> [--reason <text>]
-agentflow amend-plan <run-id> --add-path <repo-relative path> [--add-path ...] --amended-by <human identity> [--reason <text>]
 agentflow abandon <run-id> --abandoned-by <identity> [--reason <text>]
 agentflow rebase <run-id>
 ```
@@ -41,7 +40,9 @@ agentflow rebase <run-id>
   de-duplicated, and stored sorted as `test_paths` (schema stays version 1).
   Regenerating the profile without `--test-path` records no `test_paths` — there
   is no carry-forward merge.
-- `advance` selects the next stage from replayed state. Planner, builder, tester,
+- `advance` selects the next stage from replayed state. From `ready` it invokes
+  the builder against the Task Spec (summary and acceptance criteria) and commits
+  the candidate directly — there is no separate planner stage. Builder, tester,
   and reviewer stages require an adapter. The built-to-verified transition executes
   profile checks directly without a model.
 - From `verified`, `advance` runs the Tester Agent Role exactly once per candidate
@@ -80,7 +81,7 @@ agentflow rebase <run-id>
   with unchanged error semantics for nonzero exit, error subtype, and missing
   structured output. The fake and Codex adapters produce no transcript.
 - The Cursor adapter invokes the `agent` CLI in headless `stream-json` mode,
-  using `ask` mode for read-only planner and reviewer stages and `--force
+  using `ask` mode for the read-only reviewer stage and `--force
   --sandbox enabled` for the writing builder and tester stages. Because the Cursor CLI has no documented
   schema-constrained output option, the adapter prompts for one JSON object,
   extracts a candidate object from result text that may include progress prose,
@@ -108,9 +109,10 @@ agentflow rebase <run-id>
   resolution; the workflow never re-resolves it.
 - From `changes_requested`, `advance` performs bounded repair: while fewer than
   `MAX_REPAIR_ATTEMPTS` (2) `repair_ready` events exist, it invokes the builder
-  with the original plan, latest review, current candidate, and one-based
+  with the Task Spec, latest review, current candidate, and one-based
   repair attempt, requires a clean Workspace at that candidate, enforces the
-  same planned-path and report checks as the initial build, commits a new
+  same self-consistency check as the initial build (reported `files_changed`
+  equal to the authoritative diff, no unresolved issues), commits a new
   candidate, appends `repair_ready`, and re-enters `built` so checks and review
   rerun. After two repairs, the next repair attempt appends `repair_exhausted`
   and becomes `failed` without invoking a model. Build, check, review, and
@@ -121,7 +123,7 @@ agentflow rebase <run-id>
   `recorded` routing from `models.json` (an empty object when nothing is
   recorded) and its `suggested` defaults. With `--adapter claude` or
   `--adapter cursor` and repeatable `--set role=model`, it validates role names
-  against `planner`, `builder`, `reviewer`, and `tester`, merges the choices into
+  against `builder`, `reviewer`, and `tester`, merges the choices into
   `models.json`, and prints the updated routing in the same shape.
   `models.json` stores the user's recorded preference only; per-invocation
   provenance lives in the event log.
@@ -137,10 +139,9 @@ agentflow rebase <run-id>
 - `status` replays events in sequence and combines the result with captured
   input metadata. Its JSON includes `repository_profile_path` when a
   `repository_profile_captured` event supplies that relative path; runs without
-  profile evidence retain the legacy response shape. `source`,
-  `acceptance_criteria`, and `plan_amendments` appear only when present and
-  non-empty so legacy response shapes stay compatible. Each `plan_amendments`
-  entry carries `added_paths`, `amended_by`, and `reason` when it was supplied.
+  profile evidence retain the legacy response shape. `source` and
+  `acceptance_criteria` appear only when present and
+  non-empty so legacy response shapes stay compatible.
 - `list` replays every Run in Agentflow Home and prints a JSON array sorted by
   each Run's first event, so ordering is deterministic across invocations. Each
   entry carries the `status` fields `run_id`, `state`, `base_sha`, `summary`,
@@ -155,28 +156,10 @@ agentflow rebase <run-id>
   the check and the append, which would otherwise bind approval to a stale SHA.
   Conversation text is not approval evidence.
 - `reject` acquires the Run's stage claim and appends a terminal rejection:
-  from `planned`, `plan_rejected`; from `awaiting_human`, `human_rejected`
-  bound to the candidate SHA. It requires `--rejected-by` and accepts optional
-  `--reason`. Conversation text is never rejection evidence. Rejected Runs
-  cannot advance, approve, abandon, rebase, or be rejected again.
-- `amend-plan` acquires the Run's stage claim and appends a non-state-projecting
-  `plan_amended` bookkeeping event that widens the builder's allowed paths
-  without ever rewriting immutable `plan.json`. It is permitted only when the
-  replayed state is `planned` or `changes_requested`; any other state (including
-  terminal and rejected Runs) is a hard error naming the state and appends no
-  `plan_amended` event. At least one `--add-path` and `--amended-by` are
-  required, `--reason` is optional, and every added path is validated with the
-  same rules as planned paths (non-empty, relative, never escaping the
-  Workspace) before any event is appended so an invalid path leaves no trace.
-  `added_paths` are sorted and de-duplicated. Because `plan_amended` projects no
-  state, amending from `changes_requested` leaves the Run in
-  `changes_requested`, never `planned`. Like `approve`/`reject`, the command
-  records explicit human direction; conversational agreement is never amendment
-  evidence. The effective plan — the sorted union of `plan.json`'s
-  `files_to_modify` and every amendment's `added_paths` — feeds the builder,
-  repair, and reviewer stages, which enforce and review against that union; the
-  planner stage is unaffected. `status` lists recorded amendments under
-  `plan_amendments` when at least one exists.
+  from `awaiting_human`, `human_rejected` bound to the candidate SHA. It
+  requires `--rejected-by` and accepts optional `--reason`. Conversation text is
+  never rejection evidence. Rejected Runs cannot advance, approve, abandon,
+  rebase, or be rejected again.
 - `abandon` acquires the Run's stage claim before appending the terminal
   `run_abandoned` event, so a Run actively claimed by a live process cannot be
   abandoned out from under it. The event records the required `--abandoned-by`
@@ -281,7 +264,12 @@ every other Run. State is projected from event type:
 | `human_rejected` | `human_rejected` |
 | `run_abandoned` | `abandoned` |
 
-`plan_ready`, `build_ready`, `repair_ready`, `tests_ready`, `tests_failed`,
+`plan_ready`, `plan_rejected`, and `plan_amended` are legacy events that no
+command emits now that the cold planner stage has been retired; their rows (and
+`plan_amended` among the no-state-change events below) remain only so old run
+logs continue to replay unchanged.
+
+`build_ready`, `repair_ready`, `tests_ready`, `tests_failed`,
 `review_ready`, and `review_blocked` carry a `model` field naming the resolved
 model whenever the invoking adapter routes models (currently the Claude and Cursor
 adapters); the deterministic fake and Codex adapters record no `model` field. The
@@ -292,14 +280,10 @@ fake and Codex adapters produce no transcript and therefore no `transcript`
 field.
 Both fields are provenance only — state projection is unchanged.
 `repository_snapshotted`, `repository_profile_captured`, `claim_acquired`,
-`claim_released`, `claim_expired`, and `plan_amended` add evidence without
-changing state — none has an entry in the state-projection table above, so the
-`state_by_event.get(type, state)` fallback leaves the replayed state unchanged.
-`plan_amended` is the human-attributed plan-amendment bookkeeping event; it
-carries a sorted, de-duplicated `added_paths`, `amended_by`, and optional
-`reason`, and widens the effective plan fed to the builder, repair, and reviewer
-stages without rewriting `plan.json`. Amending from `planned` leaves the Run
-`planned` and from `changes_requested` leaves it `changes_requested`.
+`claim_released`, `claim_expired`, and the legacy `plan_amended` add evidence
+without changing state — none has an entry in the state-projection table above,
+so the `state_by_event.get(type, state)` fallback leaves the replayed state
+unchanged.
 `review_ready` is immediately followed by `awaiting_human` in the current
 workflow. `abandoned`, `plan_rejected`, and `human_rejected` are terminal: a
 Run can never advance and can never be approved from them. Legacy events
@@ -345,7 +329,7 @@ fields:
 Unknown Task Spec fields are rejected. Legacy summary-only `task.json` files
 remain replayable. Material upstream task change requires a new Run; there is
 no snapshot refresh mutation. The complete frozen task object is passed
-unchanged to planner, builder, tester, and reviewer stages.
+unchanged to the builder, tester, and reviewer stages.
 
 ## Check evidence enrichment
 
@@ -422,10 +406,11 @@ the only claim authority: no lock file or second store of claim state exists.
 - Each Run receives a unique branch and Workspace.
 - The Run records a fresh target-owned Repository Profile by reference, hash,
   and source fingerprint instead of copying project knowledge into Agentflow.
-- Planner, builder, tester, and reviewer outputs must satisfy strict role
+- Builder, tester, and reviewer outputs must satisfy strict role
   contracts.
-- The builder's authoritative Git diff must be a subset of planned paths and
-  must equal its reported file list.
+- The builder is confined by self-consistency: its reported `files_changed`
+  must equal its authoritative Git diff and it must report no unresolved issues.
+  There is no pre-declared file list or planned-path subset check.
 - The tester may modify only files at or under the profile's declared
   `test_paths` and never production code; its authoritative Git diff must equal
   its reported file list, and its prose findings are evidence only — only failing
@@ -441,12 +426,8 @@ the only claim authority: no lock file or second store of claim state exists.
 - Approval requires an explicit command, identity, clean Workspace, and exact
   candidate SHA.
 - Rejection requires an explicit command and identity; conversation text is
-  never rejection evidence. `plan_rejected` and `human_rejected` are terminal.
-- Plan amendment requires an explicit, human-attributed command; it only widens
-  the builder's allowed paths as recorded `plan_amended` evidence and never
-  rewrites immutable `plan.json`. It is allowed only from `planned` or
-  `changes_requested`, projects no state, and amendments only add paths — never
-  remove or narrow them.
+  never rejection evidence. `human_rejected` is terminal (legacy `plan_rejected`
+  remains terminal on replay).
 - A candidate may be repaired from `changes_requested` at most
   `MAX_REPAIR_ATTEMPTS` times; each repair commits a new candidate, preserves
   prior attempt artifacts, and re-enters `built` for checks and review.
@@ -465,12 +446,13 @@ the only claim authority: no lock file or second store of claim state exists.
   points, architecture, or repository-specific domain language.
 - Only the Claude, Cursor, Codex, and deterministic fake provider adapters
   exist.
-- The Claude adapter limits planner and reviewer roles to read-only tools, but
+- The Claude adapter limits the reviewer role to read-only tools, but
   its builder and tester roles rely on role instructions and the kernel's
-  path-scope diff enforcement rather than an operating-system sandbox.
+  diff enforcement (builder self-consistency, tester `test_paths`) rather than
+  an operating-system sandbox.
 - The Cursor CLI has no documented JSON Schema output flag or per-invocation
   granular tool allowlist. The Cursor adapter therefore uses read-only `ask`
-  mode for planner and reviewer, requests the CLI sandbox for the builder and
+  mode for the reviewer, requests the CLI sandbox for the builder and
   tester, and relies on prompt-plus-local-validation with a two-attempt bound for
   output contracts.
 - The Tester Agent Role runs after authoritative checks pass and before review,
@@ -480,5 +462,5 @@ the only claim authority: no lock file or second store of claim state exists.
   adapter exists.
 - Worktree and Workspace cleanup is not implemented: `abandon` records the
   terminal state but leaves the Run's Workspace and branch on disk.
-- `advance` performs one stage per invocation; explicit plan approval and
-  configurable role policies are not implemented yet.
+- `advance` performs one stage per invocation; configurable role policies are
+  not implemented yet.

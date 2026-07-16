@@ -12,24 +12,22 @@ from .contracts import (
     ContractError,
     contract_schema,
     validate_builder_report,
-    validate_plan,
     validate_review,
     validate_tester_report,
 )
 
 
 ROLE_INSTRUCTIONS = {
-    "planner": (
-        "Analyze the task and repository. Do not edit files. Produce the "
-        "smallest viable plan and only the required structured output."
-    ),
     "builder": (
-        "Implement the approved plan in this Workspace. Do not merge or "
-        "push. Modify only planned files, then return the required report."
+        "Implement the Task Spec and its acceptance criteria in this "
+        "Workspace. Do not merge or push. Change only what the work requires "
+        "and return the required report; the report's files_changed must match "
+        "exactly what you changed."
     ),
     "reviewer": (
-        "Review the candidate against the task, plan, and checks. Do not "
-        "edit files. Return only structured findings and disposition."
+        "Review the candidate against the task, acceptance criteria, and "
+        "checks. Do not edit files. Return only structured findings and "
+        "disposition."
     ),
     "tester": (
         "Adversarially probe the candidate against the Task Spec and "
@@ -41,18 +39,16 @@ ROLE_INSTRUCTIONS = {
     ),
 }
 
-ROLES = ("planner", "builder", "reviewer", "tester")
+ROLES = ("builder", "reviewer", "tester")
 
 SUGGESTED_MODELS = {
     "claude": {
         "builder": "opus",
-        "planner": "opus",
         "reviewer": "opus",
         "tester": "opus",
     },
     "cursor": {
         "builder": "claude-opus-4-8-thinking-high",
-        "planner": "claude-opus-4-8-thinking-high",
         "reviewer": "claude-opus-4-8-thinking-high",
         "tester": "claude-opus-4-8-thinking-high",
     },
@@ -103,7 +99,6 @@ def role_prompt(role: str, request: dict[str, Any]) -> str:
 
 def _validate_role_output(role: str, value: Any) -> dict[str, Any]:
     validators = {
-        "planner": validate_plan,
         "builder": validate_builder_report,
         "reviewer": validate_review,
         "tester": validate_tester_report,
@@ -373,7 +368,7 @@ class CursorAdapter:
             "--model",
             model,
         ]
-        if role in {"planner", "reviewer"}:
+        if role == "reviewer":
             arguments.extend(["--mode", "ask"])
         else:
             arguments.extend(["--force", "--sandbox", "enabled"])
@@ -459,7 +454,6 @@ class ClaudeAdapter:
         "Bash",
     ]
     _ROLE_ARGUMENTS = {
-        "planner": _READ_ONLY_ARGUMENTS,
         "builder": _WRITE_ARGUMENTS,
         "reviewer": _READ_ONLY_ARGUMENTS,
         "tester": _WRITE_ARGUMENTS,

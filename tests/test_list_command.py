@@ -47,22 +47,21 @@ def status_without_workspace_fields(
     }
 
 
-def write_planner_fixture(temp_path: Path) -> Path:
+def write_builder_fixture(temp_path: Path) -> Path:
     fixture_path = temp_path / "adapter-fixture.json"
     fixture_path.write_text(
         json.dumps(
             {
-                "planner": {
-                    "files_to_modify": ["README.md"],
-                    "risks": [],
-                    "steps": [
-                        {
-                            "description": "Document the health endpoint",
-                            "id": "P1",
-                            "verification": "The authoritative checks pass",
-                        }
-                    ],
-                    "summary": "Add a health endpoint",
+                "builder": {
+                    "output": {
+                        "commands_run": [],
+                        "files_changed": ["README.md"],
+                        "steps_completed": ["P1"],
+                        "unresolved_issues": [],
+                    },
+                    "writes": {
+                        "README.md": "# Target\n\nHealth endpoint documented.\n"
+                    },
                 }
             }
         ),
@@ -75,8 +74,8 @@ def create_three_state_runs(
     temp_path: Path,
     environment: dict[str, str],
 ) -> tuple[Path, dict[str, str]]:
-    repository, data_dir, planned_run = create_profiled_run(temp_path, environment)
-    run_ids = {"planned": planned_run}
+    repository, data_dir, built_run = create_profiled_run(temp_path, environment)
+    run_ids = {"built": built_run}
     for state, summary in (
         ("ready", "Second task stays ready"),
         ("abandoned", "Third task gets abandoned"),
@@ -92,10 +91,10 @@ def create_three_state_runs(
         if started.returncode != 0:
             raise AssertionError(started.stderr)
         run_ids[state] = json.loads(started.stdout)["run_id"]
-    fixture_path = write_planner_fixture(temp_path)
-    planned = agentflow(
+    fixture_path = write_builder_fixture(temp_path)
+    built = agentflow(
         "advance",
-        run_ids["planned"],
+        run_ids["built"],
         "--adapter",
         "fake",
         "--adapter-fixture",
@@ -105,8 +104,8 @@ def create_three_state_runs(
         cwd=temp_path,
         environment=environment,
     )
-    if planned.returncode != 0:
-        raise AssertionError(planned.stderr)
+    if built.returncode != 0:
+        raise AssertionError(built.stderr)
     abandoned = agentflow(
         "abandon",
         run_ids["abandoned"],
@@ -167,7 +166,10 @@ class ListCommandTests(unittest.TestCase):
                 self.assertIsInstance(entry["summary"], str)
                 self.assertIsInstance(entry["repository"], str)
                 self.assertNotIn("worktree", entry)
-                self.assertNotIn("candidate_sha", entry)
+                if entry["state"] == "built":
+                    self.assertEqual(len(entry["candidate_sha"]), 40)
+                else:
+                    self.assertNotIn("candidate_sha", entry)
                 self.assertNotIn("approved_sha", entry)
                 self.assertNotIn("acceptance_criteria", entry)
                 self.assertNotIn("source", entry)

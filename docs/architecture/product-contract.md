@@ -54,7 +54,7 @@ Every behavior statement carries one of three classifications:
 
 - **Implemented.** A Run captures one immutable Task Spec and one exact base
   commit, starts only from a clean Target Repository checkout, and proceeds
-  through planner, builder, checks, tester, and reviewer stages driven by
+  through builder, checks, tester, and reviewer stages driven by
   replayed state. `advance` performs one stage per invocation. The Task Spec may include
   optional `source` (`provider`, `work_item_id`, `captured_at` with an explicit
   timezone, and importer-supplied `content_hash`) and `acceptance_criteria`
@@ -65,10 +65,11 @@ Every behavior statement carries one of three classifications:
   upstream task change requires a new Run — there is no snapshot refresh.
   `status` exposes `source` and `acceptance_criteria` only when present and
   non-empty; `list` stays concise without those fields. The complete frozen
-  task object is passed to planner, builder, tester, and reviewer.
-- **Implemented.** Planner, builder, tester, and reviewer outputs must satisfy
-  strict versioned role contracts; the builder's authoritative Git diff must be a
-  subset of planned paths and must equal its reported file list, and the tester's
+  task object is passed to the builder, tester, and reviewer.
+- **Implemented.** Builder, tester, and reviewer outputs must satisfy
+  strict versioned role contracts; the builder is confined by self-consistency —
+  its reported `files_changed` must equal its authoritative Git diff and it must
+  report no unresolved issues — and the tester's
   authoritative Git diff must equal its reported file list and stay at or under
   the profile's declared `test_paths`.
 - **Implemented.** Workspace integrity is enforced beyond the tracked-file diff:
@@ -105,7 +106,7 @@ Every behavior statement carries one of three classifications:
   that must pass checks, review, and the `awaiting_human` gate again.
 - **Implemented.** Bounded repair out of `changes_requested`: while fewer than
   `MAX_REPAIR_ATTEMPTS` (2) `repair_ready` events exist, `advance` invokes the
-  builder with the original plan, latest review, current candidate, and
+  builder with the Task Spec, latest review, current candidate, and
   one-based repair attempt; commits a new candidate; appends `repair_ready`;
   and re-enters `built` so checks and review rerun. After two repairs, the next
   repair attempt appends terminal `repair_exhausted` without invoking a model.
@@ -114,20 +115,10 @@ Every behavior statement carries one of three classifications:
   advances on `candidate_rebased`, so checks and reviews after a rebase cannot
   overwrite pre-rebase artifacts.
 - **Implemented.** Explicit rejection: claim-guarded `reject` with required
-  `--rejected-by` and optional `--reason`. From `planned` it appends terminal
-  `plan_rejected`; from `awaiting_human` it appends terminal `human_rejected`
-  bound to the candidate SHA. Rejection conversation text is never evidence.
+  `--rejected-by` and optional `--reason`. From `awaiting_human` it appends
+  terminal `human_rejected` bound to the candidate SHA. Rejection conversation
+  text is never evidence.
   Rejected Runs cannot advance, approve, abandon, rebase, or be rejected again.
-- **Implemented.** Human-attributed plan amendment: claim-guarded `amend-plan`
-  with at least one `--add-path`, required `--amended-by`, and optional
-  `--reason` widens the builder's allowed paths as recorded `plan_amended`
-  evidence, never by editing immutable `plan.json`. It is permitted only from
-  `planned` or `changes_requested`, projects no state, validates added paths
-  like planned paths before appending, and only ever adds paths. The effective
-  plan (the sorted union of `plan.json` and every amendment's `added_paths`)
-  feeds and is enforced across the builder, repair, and reviewer stages, so a
-  Run blocked only because the planner omitted a file can proceed instead of
-  being abandoned. Conversational agreement is never amendment evidence.
 - **Implemented.** Adversarial Tester Agent Role between checks and review: from
   `verified`, `advance` runs the tester exactly once per candidate generation. It
   may write only files at or under the profile's declared `test_paths` and never
@@ -138,7 +129,7 @@ Every behavior statement carries one of three classifications:
   the unchanged candidate without re-running checks. Its prose findings are
   recorded and surfaced to the reviewer but never gate the workflow on their own.
   A run lacking declared `test_paths` fails the stage deterministically.
-- **Target.** Explicit plan approval, a bounded builder-fix retry loop from
+- **Target.** A bounded builder-fix retry loop from
   tester failures, a constrained Merge Agent, and Post-Merge Verification. Merge
   and deployment remain manual after approval until these exist.
 - **Target.** Reconciliation and Workspace cleanup after abandonment.
@@ -234,8 +225,11 @@ Every behavior statement carries one of three classifications:
   validated output contracts. Discoveries are applied to the Work Graph only
   by deterministic validation code; no agent mutates the Work Graph directly.
 - **Target.** Automatic dispatch of a ready Work Item into its own gated Run;
-  today ready work is computed and the operator starts each Run. Retiring the
-  cold planner stage in favor of framing is tracked with this work.
+  today ready work is computed and the operator starts each Run.
+- **Implemented.** The cold planner stage has been retired in favor of warm
+  framing (ADR 0005): a Run advances `ready` -> `built` directly by invoking the
+  builder against the Task Spec, with no `plan_ready`/`plan.json` stage in
+  between.
 
 ## Reconciliation
 
@@ -256,10 +250,11 @@ Every behavior statement carries one of three classifications:
   for tests. Their executables are overridable via `AGENTFLOW_CLAUDE`,
   `AGENTFLOW_CURSOR`, and `AGENTFLOW_CODEX`. Changing an adapter must not
   change workflow state semantics, verification rules, or approval authority.
-- **Implemented.** Planner and reviewer roles run read-only; the builder and
-  tester roles are constrained by role instructions and the kernel's path-scope
-  diff enforcement (planned paths for the builder, declared `test_paths` for the
-  tester). The Cursor builder and tester additionally request the Cursor CLI's
+- **Implemented.** The reviewer role runs read-only; the builder and
+  tester roles are constrained by role instructions and the kernel's diff
+  enforcement (the builder's reported `files_changed` must equal its
+  authoritative diff, and the tester stays at or under the declared
+  `test_paths`). The Cursor builder and tester additionally request the Cursor CLI's
   sandbox while auto-approving operations; the Claude adapter does not provide
   an operating-system sandbox for its writing roles.
 - **Implemented.** Cursor output is treated as untrusted model text because the
@@ -273,13 +268,13 @@ Every behavior statement carries one of three classifications:
   choices in `models.json` in Agentflow Home. Each invocation resolves
   `advance --model`, then the adapter's `AGENTFLOW_<ADAPTER>_<ROLE>_MODEL`
   environment variable, then recorded routing, then suggested defaults. The
-  resolved model is recorded on the stage's `plan_ready`, `build_ready`,
+  resolved model is recorded on the stage's `build_ready`,
   `repair_ready`, `tests_ready`, `tests_failed`, `review_ready`, or
   `review_blocked` event. The suggested defaults cover the tester role for both
   adapters; the fake and Codex adapters route no models and record no `model`
   field.
 - **Implemented.** Live role observability for the Claude and Cursor adapters:
-  each planner, builder, tester, and reviewer stage streams the provider's output
+  each builder, tester, and reviewer stage streams the provider's output
   (`stream-json`) to a tailable `runs/<run-id>/<role>-transcript.jsonl`
   evidence file referenced from the stage event, and the read-only `watch`
   command follows a Run's events and growing transcript until it reaches a

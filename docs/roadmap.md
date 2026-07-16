@@ -69,20 +69,12 @@ for the Work-Graph and reconciliation milestones below and is fixed first.
 - Check records enriched with `started_at`, `duration_ms`, shared per-stage
   `attempt`, and an allowlisted environment fingerprint only.
 
-## Completed: human plan amendment
+## Retired: human plan amendment
 
-- Claim-guarded `amend-plan <run-id> --add-path <path> [--add-path ...]
-  --amended-by <identity> [--reason <text>]` appends a human-attributed,
-  non-state-projecting `plan_amended` event, permitted only from `planned` or
-  `changes_requested`.
-- The event widens the builder's allowed paths without ever rewriting immutable
-  `plan.json`; an effective plan unions `plan.json`'s `files_to_modify` with
-  every amendment's sorted, de-duplicated `added_paths` and feeds the builder,
-  repair, and reviewer stages.
-- Added paths are validated like planned paths before any event is appended, so
-  an invalid path leaves no trace; amendments only add paths, never remove them.
-- `status` lists recorded amendments under `plan_amendments`; conversational
-  agreement is never amendment evidence.
+The `amend-plan` command and `plan_amended` events existed only to patch the
+cold planner's pre-declared `files_to_modify` list when it guessed wrong. With
+the planner and file-list confinement retired (below), amendment has no purpose
+and was removed; legacy `plan_amended` events remain replayable.
 
 ## Completed: adversarial verification gate
 
@@ -113,10 +105,15 @@ for the Work-Graph and reconciliation milestones below and is fixed first.
 - **Done.** An Agentflow-owned `framing` skill that runs warm in the operator's
   session, composing the Matt Pocock skills (grill-with-docs → to-prd/to-spec →
   to-tickets) into an approved Work Graph. See ADR 0005.
-- **Next.** Retire the cold planner stage; a Run begins at build against an
-  approved Work Item captured by id and content hash.
+- **Done.** The cold planner stage is retired (GitHub issue #4): a Run advances
+  `ready → built` by invoking the builder against the Task Spec, and builder
+  confinement is self-consistency (reported files equal the authoritative diff)
+  rather than a pre-declared file list — trust rests on checks, the tester, the
+  reviewer, and human approval.
+- **Next.** Capture an approved Work Item into a Run's Task Spec by id and
+  content hash, and auto-dispatch ready Work Items into gated Runs.
 - **Next.** Spec-approval gate as recorded evidence, distinct from candidate
-  approval; automatic dispatch of ready Work Items into gated Runs.
+  approval.
 
 ## Later: Workspace enforcement hardening
 

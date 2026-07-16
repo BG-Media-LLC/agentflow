@@ -37,22 +37,21 @@ def read_events(data_dir: Path, run_id: str) -> list[dict]:
     ]
 
 
-def write_planner_fixture(temp_path: Path) -> Path:
+def write_builder_fixture(temp_path: Path) -> Path:
     fixture_path = temp_path / "adapter-fixture.json"
     fixture_path.write_text(
         json.dumps(
             {
-                "planner": {
-                    "files_to_modify": ["README.md"],
-                    "risks": [],
-                    "steps": [
-                        {
-                            "description": "Document the health endpoint",
-                            "id": "P1",
-                            "verification": "The authoritative checks pass",
-                        }
-                    ],
-                    "summary": "Add a health endpoint",
+                "builder": {
+                    "output": {
+                        "commands_run": [],
+                        "files_changed": ["README.md"],
+                        "steps_completed": ["P1"],
+                        "unresolved_issues": [],
+                    },
+                    "writes": {
+                        "README.md": "# Target\n\nHealth endpoint documented.\n"
+                    },
                 }
             }
         ),
@@ -85,7 +84,7 @@ class StageClaimTests(unittest.TestCase):
             events_path = data_dir / "runs" / run_id / "events.jsonl"
             events_before = events_path.read_text(encoding="utf-8")
             expires_at = read_events(data_dir, run_id)[-1]["expires_at"]
-            fixture_path = write_planner_fixture(temp_path)
+            fixture_path = write_builder_fixture(temp_path)
 
             advanced = agentflow(
                 "advance",
@@ -127,7 +126,7 @@ class StageClaimTests(unittest.TestCase):
                 lease_seconds=60,
                 now=datetime.now(timezone.utc) - timedelta(seconds=7200),
             )
-            fixture_path = write_planner_fixture(temp_path)
+            fixture_path = write_builder_fixture(temp_path)
 
             advanced = agentflow(
                 "advance",
@@ -143,11 +142,11 @@ class StageClaimTests(unittest.TestCase):
             )
 
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
-            self.assertEqual(json.loads(advanced.stdout)["state"], "planned")
+            self.assertEqual(json.loads(advanced.stdout)["state"], "built")
             events = read_events(data_dir, run_id)
             self.assertEqual(
                 [event["type"] for event in events[-4:]],
-                ["claim_expired", "claim_acquired", "plan_ready", "claim_released"],
+                ["claim_expired", "claim_acquired", "build_ready", "claim_released"],
             )
             self.assertEqual(events[-4]["holder"], "expired-process")
             self.assertNotEqual(events[-3]["holder"], "expired-process")
@@ -228,7 +227,7 @@ class StageClaimTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
-            fixture_path = write_planner_fixture(temp_path)
+            fixture_path = write_builder_fixture(temp_path)
 
             advanced = agentflow(
                 "advance",
@@ -278,8 +277,8 @@ class StageClaimTests(unittest.TestCase):
             events = read_events(data_dir, run_id)
             acquired = [e for e in events if e["type"] == "claim_acquired"]
             released = [e for e in events if e["type"] == "claim_released"]
-            self.assertEqual(len(acquired), 5)
-            self.assertEqual(len(released), 5)
+            self.assertEqual(len(acquired), 4)
+            self.assertEqual(len(released), 4)
 
             approved = agentflow(
                 "approve",

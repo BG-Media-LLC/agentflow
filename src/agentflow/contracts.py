@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
@@ -10,7 +9,6 @@ class ContractError(ValueError):
     pass
 
 
-MIN_PLAN_TEXT_LENGTH = 20
 _CONTENT_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _TASK_SOURCE_FIELDS = ("provider", "work_item_id", "captured_at", "content_hash")
 
@@ -199,34 +197,6 @@ def _reject_dependency_cycles(items: list[dict[str, Any]]) -> None:
 
 
 def contract_schema(role: str) -> dict[str, Any]:
-    if role == "planner":
-        return {
-            "additionalProperties": False,
-            "properties": {
-                "files_to_modify": {
-                    "items": {"type": "string"},
-                    "minItems": 1,
-                    "type": "array",
-                },
-                "risks": {"items": {"type": "string"}, "type": "array"},
-                "steps": {
-                    "items": {
-                        "additionalProperties": False,
-                        "properties": {
-                            "description": {"type": "string"},
-                            "id": {"type": "string"},
-                            "verification": {"type": "string"},
-                        },
-                        "required": ["description", "id", "verification"],
-                        "type": "object",
-                    },
-                    "type": "array",
-                },
-                "summary": {"type": "string"},
-            },
-            "required": ["files_to_modify", "risks", "steps", "summary"],
-            "type": "object",
-        }
     if role == "builder":
         fields = {
             name: {"items": {"type": "string"}, "type": "array"}
@@ -298,92 +268,6 @@ def contract_schema(role: str) -> dict[str, Any]:
             "type": "object",
         }
     raise ValueError(f"no output contract for role {role}")
-
-
-def _require_plan_substance(label: str, text: str) -> None:
-    if len(text.strip()) < MIN_PLAN_TEXT_LENGTH:
-        raise ContractError(
-            f"plan {label} must contain at least {MIN_PLAN_TEXT_LENGTH} characters"
-        )
-
-
-def validate_plan(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ContractError("plan must be an object")
-    required = {"summary", "files_to_modify", "steps", "risks"}
-    if set(value) != required:
-        raise ContractError(f"plan fields must be exactly {sorted(required)}")
-    if not isinstance(value["summary"], str) or not value["summary"].strip():
-        raise ContractError("plan summary must be a non-empty string")
-    _require_plan_substance("summary", value["summary"])
-    if not isinstance(value["files_to_modify"], list) or not value["files_to_modify"]:
-        raise ContractError("plan files_to_modify must be a non-empty list of paths")
-    if not all(
-        isinstance(path, str) and path for path in value["files_to_modify"]
-    ):
-        raise ContractError("plan files_to_modify must be a list of paths")
-    if len(set(value["files_to_modify"])) != len(value["files_to_modify"]):
-        raise ContractError("plan files_to_modify must not contain duplicates")
-    for path in value["files_to_modify"]:
-        planned_path = PurePosixPath(path)
-        if planned_path.is_absolute() or ".." in planned_path.parts:
-            raise ContractError(
-                "plan files_to_modify paths must stay within the Workspace"
-            )
-    if not isinstance(value["risks"], list) or not all(
-        isinstance(risk, str) and risk for risk in value["risks"]
-    ):
-        raise ContractError("plan risks must be a list of strings")
-    if not isinstance(value["steps"], list) or not value["steps"]:
-        raise ContractError("plan steps must be a non-empty list")
-    for step in value["steps"]:
-        if not isinstance(step, dict) or set(step) != {
-            "id",
-            "description",
-            "verification",
-        }:
-            raise ContractError(
-                "each plan step must contain id, description, and verification"
-            )
-        if not all(isinstance(step[field], str) and step[field] for field in step):
-            raise ContractError("plan step fields must be non-empty strings")
-        _require_plan_substance("step description", step["description"])
-        _require_plan_substance("step verification", step["verification"])
-    return value
-
-
-def validate_planned_paths(*, plan: dict[str, Any], workspace: Path) -> None:
-    """Reject planned paths that are not creatable or editable in the Workspace.
-
-    Call only from workflow code that has a Workspace. Adapter-local
-    ``validate_plan`` intentionally skips filesystem checks so providers can
-    validate shape without a checkout.
-    """
-    workspace = workspace.resolve()
-    for path in plan["files_to_modify"]:
-        planned_path = PurePosixPath(path)
-        if planned_path.is_absolute() or ".." in planned_path.parts:
-            raise ContractError(
-                "plan files_to_modify paths must stay within the Workspace"
-            )
-        target = (workspace / path).resolve()
-        try:
-            target.relative_to(workspace)
-        except ValueError as error:
-            raise ContractError(
-                "plan files_to_modify paths must stay within the Workspace"
-            ) from error
-        if target.exists():
-            if not target.is_file():
-                raise ContractError(
-                    f"plan files_to_modify path is not a regular file: {path}"
-                )
-            continue
-        parent = target.parent
-        if not parent.is_dir():
-            raise ContractError(
-                f"plan files_to_modify parent directory does not exist: {path}"
-            )
 
 
 def validate_builder_report(value: Any) -> dict[str, Any]:

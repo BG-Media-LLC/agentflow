@@ -54,13 +54,13 @@ test requires an override.
 Before the first model-requiring `advance` with a given adapter, run
 `agentflow models` and inspect its recorded routing. When no routing is
 recorded for that adapter, or the model provider has changed since it was
-recorded, ask the user which model to use for each role (planner, builder,
+recorded, ask the user which model to use for each role (builder,
 tester, reviewer) while presenting the suggested defaults from the command's
 output, then record the answer:
 
 ```bash
 agentflow models                                             # inspect routing
-agentflow models --adapter cursor --set planner=claude-opus-4-8-thinking-high
+agentflow models --adapter cursor --set builder=claude-opus-4-8-thinking-high
 ```
 
 Never silently assume a model choice. Each invocation resolves the model per
@@ -73,7 +73,6 @@ Advance exactly one recorded stage at a time, selecting an installed Agent
 Adapter (`claude`, `cursor`, or `codex`) for the stages that require one:
 
 ```bash
-agentflow advance <run-id> --adapter cursor  # plan
 agentflow advance <run-id> --adapter cursor  # build and commit candidate
 agentflow advance <run-id>                   # authoritative checks
 agentflow advance <run-id> --adapter cursor  # tester probes under test_paths
@@ -122,34 +121,16 @@ Do not translate ordinary conversational agreement into approval.
 
 ## Record rejection
 
-If the user explicitly rejects a plan or a candidate, record it with the
-claim-guarded reject command. From `planned` this appends terminal
-`plan_rejected`. From `awaiting_human` this appends terminal `human_rejected`
-bound to the candidate SHA. Conversation text is never rejection evidence:
+If the user explicitly rejects a candidate, record it with the
+claim-guarded reject command. From `awaiting_human` this appends terminal
+`human_rejected` bound to the candidate SHA. Conversation text is never
+rejection evidence:
 
 ```bash
 agentflow reject <run-id> --rejected-by <human identity> [--reason <text>]
 ```
 
 Rejected Runs cannot advance, approve, abandon, rebase, or be rejected again.
-
-## Amend the plan
-
-If a Run is blocked only because the planner omitted a file the builder must
-touch, and the user explicitly directs it, widen the builder's allowed paths
-with the claim-guarded amend command instead of abandoning the Run:
-
-```bash
-agentflow amend-plan <run-id> --add-path <repo-relative path> [--add-path ...] --amended-by <human identity> [--reason <text>]
-```
-
-This is permitted only from `planned` or `changes_requested`. It appends a
-`plan_amended` event that widens the effective plan fed to the builder, repair,
-and reviewer stages without rewriting immutable `plan.json`, and it only ever
-adds paths. Like approval and rejection, amendment records explicit human
-direction: ordinary conversational agreement is never amendment evidence, so
-amend only when the user has explicitly directed it. `agentflow status`
-lists recorded amendments under `plan_amendments`.
 
 ## Preserve gate integrity
 

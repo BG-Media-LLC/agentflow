@@ -16,47 +16,14 @@ from test_advance_command import (
 
 SUGGESTED = {
     "builder": "opus",
-    "planner": "opus",
     "reviewer": "opus",
     "tester": "opus",
 }
 CURSOR_SUGGESTED = {
     "builder": "claude-opus-4-8-thinking-high",
-    "planner": "claude-opus-4-8-thinking-high",
     "reviewer": "claude-opus-4-8-thinking-high",
     "tester": "claude-opus-4-8-thinking-high",
 }
-
-PLANNER_STUB_TEMPLATE = """#!/usr/bin/env python3
-import json
-import sys
-
-arguments = sys.argv[1:]
-
-
-def value(flag):
-    return arguments[arguments.index(flag) + 1]
-
-
-assert value("--model") == {expected_model!r}, value("--model")
-assert "planner" in sys.stdin.read()
-print(json.dumps({{
-    "type": "result",
-    "subtype": "success",
-    "is_error": False,
-    "result": "planned",
-    "structured_output": {{
-        "files_to_modify": ["README.md"],
-        "risks": [],
-        "steps": [{{
-            "description": "Document the health endpoint",
-            "id": "P1",
-            "verification": "The authoritative checks pass"
-        }}],
-        "summary": "Add a health endpoint"
-    }}
-}}))
-"""
 
 BUILDER_STUB_TEMPLATE = """#!/usr/bin/env python3
 import json
@@ -90,7 +57,7 @@ print(json.dumps({{
 """
 
 
-RECORDING_PLANNER_STUB = """#!/usr/bin/env python3
+RECORDING_BUILDER_STUB = """#!/usr/bin/env python3
 import json
 import os
 from pathlib import Path
@@ -107,21 +74,20 @@ with Path(os.environ["AGENTFLOW_STUB_MODEL_LOG"]).open(
     "a", encoding="utf-8"
 ) as handle:
     handle.write(value("--model") + "\\n")
-assert "planner" in sys.stdin.read()
+assert "builder" in sys.stdin.read()
+Path("README.md").write_text(
+    "# Target\\n\\nHealth endpoint documented.\\n", encoding="utf-8"
+)
 print(json.dumps({
     "type": "result",
     "subtype": "success",
     "is_error": False,
-    "result": "planned",
+    "result": "built",
     "structured_output": {
-        "files_to_modify": ["README.md"],
-        "risks": [],
-        "steps": [{
-            "description": "Document the health endpoint",
-            "id": "P1",
-            "verification": "The authoritative checks pass"
-        }],
-        "summary": "Add a health endpoint"
+        "commands_run": [],
+        "files_changed": ["README.md"],
+        "steps_completed": ["P1"],
+        "unresolved_issues": []
     }
 }))
 """
@@ -155,16 +121,16 @@ def read_events(data_dir: Path, run_id: str) -> list[dict]:
 
 
 class ModelsCommandTests(unittest.TestCase):
-    def test_planner_falls_back_to_the_suggested_model(self) -> None:
+    def test_builder_falls_back_to_the_suggested_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "opus")
+            write_stub(fake_claude, BUILDER_STUB_TEMPLATE, "opus")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
 
-            planned = agentflow(
+            built = agentflow(
                 "advance",
                 run_id,
                 "--adapter",
@@ -175,15 +141,15 @@ class ModelsCommandTests(unittest.TestCase):
                 environment=environment,
             )
 
-            self.assertEqual(planned.returncode, 0, planned.stderr)
-            self.assertEqual(json.loads(planned.stdout)["state"], "planned")
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(json.loads(built.stdout)["state"], "built")
 
-    def test_planner_uses_the_recorded_model_routing(self) -> None:
+    def test_builder_uses_the_recorded_model_routing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "recorded-model")
+            write_stub(fake_claude, BUILDER_STUB_TEMPLATE, "recorded-model")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
             recorded = agentflow(
@@ -191,7 +157,7 @@ class ModelsCommandTests(unittest.TestCase):
                 "--adapter",
                 "claude",
                 "--set",
-                "planner=recorded-model",
+                "builder=recorded-model",
                 "--data-dir",
                 str(data_dir),
                 cwd=temp_path,
@@ -199,7 +165,7 @@ class ModelsCommandTests(unittest.TestCase):
             )
             self.assertEqual(recorded.returncode, 0, recorded.stderr)
 
-            planned = agentflow(
+            built = agentflow(
                 "advance",
                 run_id,
                 "--adapter",
@@ -210,24 +176,24 @@ class ModelsCommandTests(unittest.TestCase):
                 environment=environment,
             )
 
-            self.assertEqual(planned.returncode, 0, planned.stderr)
-            self.assertEqual(json.loads(planned.stdout)["state"], "planned")
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(json.loads(built.stdout)["state"], "built")
 
     def test_environment_variable_overrides_the_recorded_routing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "environment-model")
+            write_stub(fake_claude, BUILDER_STUB_TEMPLATE, "environment-model")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
-            environment["AGENTFLOW_CLAUDE_PLANNER_MODEL"] = "environment-model"
+            environment["AGENTFLOW_CLAUDE_BUILDER_MODEL"] = "environment-model"
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
             recorded = agentflow(
                 "models",
                 "--adapter",
                 "claude",
                 "--set",
-                "planner=recorded-model",
+                "builder=recorded-model",
                 "--data-dir",
                 str(data_dir),
                 cwd=temp_path,
@@ -235,7 +201,7 @@ class ModelsCommandTests(unittest.TestCase):
             )
             self.assertEqual(recorded.returncode, 0, recorded.stderr)
 
-            planned = agentflow(
+            built = agentflow(
                 "advance",
                 run_id,
                 "--adapter",
@@ -246,20 +212,20 @@ class ModelsCommandTests(unittest.TestCase):
                 environment=environment,
             )
 
-            self.assertEqual(planned.returncode, 0, planned.stderr)
-            self.assertEqual(json.loads(planned.stdout)["state"], "planned")
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(json.loads(built.stdout)["state"], "built")
 
     def test_advance_model_option_overrides_the_environment_variable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "explicit-model")
+            write_stub(fake_claude, BUILDER_STUB_TEMPLATE, "explicit-model")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
-            environment["AGENTFLOW_CLAUDE_PLANNER_MODEL"] = "environment-model"
+            environment["AGENTFLOW_CLAUDE_BUILDER_MODEL"] = "environment-model"
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
 
-            planned = agentflow(
+            built = agentflow(
                 "advance",
                 run_id,
                 "--adapter",
@@ -272,8 +238,8 @@ class ModelsCommandTests(unittest.TestCase):
                 environment=environment,
             )
 
-            self.assertEqual(planned.returncode, 0, planned.stderr)
-            self.assertEqual(json.loads(planned.stdout)["state"], "planned")
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(json.loads(built.stdout)["state"], "built")
 
     def test_advance_rejects_model_option_for_non_routing_adapters(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -325,7 +291,7 @@ class ModelsCommandTests(unittest.TestCase):
                 "--adapter",
                 "claude",
                 "--set",
-                "planner=fable",
+                "reviewer=fable",
                 "--set",
                 "builder=opus",
                 "--data-dir",
@@ -338,7 +304,7 @@ class ModelsCommandTests(unittest.TestCase):
                 json.loads(recorded.stdout),
                 {
                     "claude": {
-                        "recorded": {"builder": "opus", "planner": "fable"},
+                        "recorded": {"builder": "opus", "reviewer": "fable"},
                         "suggested": SUGGESTED,
                     },
                     "cursor": {"recorded": {}, "suggested": CURSOR_SUGGESTED},
@@ -346,7 +312,7 @@ class ModelsCommandTests(unittest.TestCase):
             )
             self.assertEqual(
                 json.loads((data_dir / "models.json").read_text(encoding="utf-8")),
-                {"claude": {"builder": "opus", "planner": "fable"}},
+                {"claude": {"builder": "opus", "reviewer": "fable"}},
             )
 
             replayed = agentflow(
@@ -410,21 +376,9 @@ class ModelsCommandTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STUB_TEMPLATE, "opus")
+            write_stub(fake_claude, BUILDER_STUB_TEMPLATE, "opus")
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
-            planned = agentflow(
-                "advance",
-                run_id,
-                "--adapter",
-                "claude",
-                "--data-dir",
-                str(data_dir),
-                cwd=temp_path,
-                environment=environment,
-            )
-            self.assertEqual(planned.returncode, 0, planned.stderr)
-            write_stub(fake_claude, BUILDER_STUB_TEMPLATE, "opus")
 
             built = agentflow(
                 "advance",
@@ -439,13 +393,9 @@ class ModelsCommandTests(unittest.TestCase):
 
             self.assertEqual(built.returncode, 0, built.stderr)
             events = read_events(data_dir, run_id)
-            plan_ready = next(
-                event for event in events if event["type"] == "plan_ready"
-            )
             build_ready = next(
                 event for event in events if event["type"] == "build_ready"
             )
-            self.assertEqual(plan_ready["model"], "opus")
             self.assertEqual(build_ready["model"], "opus")
 
     def test_stage_event_model_matches_the_single_cli_resolution(self) -> None:
@@ -453,14 +403,14 @@ class ModelsCommandTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            fake_claude.write_text(RECORDING_PLANNER_STUB, encoding="utf-8")
+            fake_claude.write_text(RECORDING_BUILDER_STUB, encoding="utf-8")
             fake_claude.chmod(0o755)
             model_log = temp_path / "model-argv.log"
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             environment["AGENTFLOW_STUB_MODEL_LOG"] = str(model_log)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
 
-            planned = agentflow(
+            built = agentflow(
                 "advance",
                 run_id,
                 "--adapter",
@@ -471,18 +421,18 @@ class ModelsCommandTests(unittest.TestCase):
                 environment=environment,
             )
 
-            self.assertEqual(planned.returncode, 0, planned.stderr)
+            self.assertEqual(built.returncode, 0, built.stderr)
             recorded = model_log.read_text(encoding="utf-8").splitlines()
             # The CLI is the only consumer of the resolved model; it is invoked
             # exactly once, proving the model is resolved a single time.
             self.assertEqual(len(recorded), 1, recorded)
             events = read_events(data_dir, run_id)
-            plan_ready = next(
-                event for event in events if event["type"] == "plan_ready"
+            build_ready = next(
+                event for event in events if event["type"] == "build_ready"
             )
             # The event's provenance is stamped from that same single
             # resolution, never re-resolved.
-            self.assertEqual(plan_ready["model"], recorded[0])
+            self.assertEqual(build_ready["model"], recorded[0])
 
     def test_fake_adapter_stage_events_record_no_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -513,7 +463,6 @@ class ModelsCommandTests(unittest.TestCase):
             stage_events = {event["type"] for event in events}
             self.assertLessEqual(
                 {
-                    "plan_ready",
                     "build_ready",
                     "checks_passed",
                     "tests_ready",

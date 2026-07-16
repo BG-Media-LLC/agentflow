@@ -15,43 +15,6 @@ from test_advance_command import (
 )
 
 
-PLANNER_STREAM_STUB = """#!/usr/bin/env python3
-import json
-import sys
-
-arguments = sys.argv[1:]
-
-
-def value(flag):
-    return arguments[arguments.index(flag) + 1]
-
-
-assert value("--output-format") == "stream-json"
-assert "--include-partial-messages" not in arguments
-assert "planner" in sys.stdin.read()
-print(json.dumps({"type": "system", "subtype": "init"}))
-print(json.dumps({
-    "type": "assistant",
-    "message": {"content": "planning the health endpoint"},
-}))
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "is_error": False,
-    "result": "planned",
-    "structured_output": {
-        "files_to_modify": ["README.md"],
-        "risks": [],
-        "steps": [{
-            "description": "Document the health endpoint",
-            "id": "P1",
-            "verification": "The authoritative checks pass"
-        }],
-        "summary": "Add a health endpoint"
-    }
-}))
-"""
-
 BUILDER_STREAM_STUB = """#!/usr/bin/env python3
 import json
 from pathlib import Path
@@ -65,6 +28,7 @@ def value(flag):
 
 
 assert value("--output-format") == "stream-json"
+assert "--include-partial-messages" not in arguments
 assert "builder" in sys.stdin.read()
 print(json.dumps({"type": "system", "subtype": "init"}))
 print(json.dumps({
@@ -149,48 +113,11 @@ class WatchCommandTests(unittest.TestCase):
             temp_path = Path(temp_dir)
             environment = base_environment()
             fake_claude = temp_path / "claude"
-            write_stub(fake_claude, PLANNER_STREAM_STUB)
+            write_stub(fake_claude, BUILDER_STREAM_STUB)
             environment["AGENTFLOW_CLAUDE"] = str(fake_claude)
             _, data_dir, run_id = create_profiled_run(temp_path, environment)
             run_dir = data_dir / "runs" / run_id
 
-            planned = agentflow(
-                "advance",
-                run_id,
-                "--adapter",
-                "claude",
-                "--data-dir",
-                str(data_dir),
-                cwd=temp_path,
-                environment=environment,
-            )
-
-            self.assertEqual(planned.returncode, 0, planned.stderr)
-            self.assertEqual(json.loads(planned.stdout)["state"], "planned")
-            planner_transcript = run_dir / "planner-transcript.jsonl"
-            self.assertTrue(planner_transcript.is_file())
-            transcript_lines = [
-                json.loads(line)
-                for line in planner_transcript.read_text(
-                    encoding="utf-8"
-                ).splitlines()
-            ]
-            self.assertIn(
-                "planning the health endpoint",
-                planner_transcript.read_text(encoding="utf-8"),
-            )
-            self.assertEqual(transcript_lines[-1]["type"], "result")
-            # Structured output is still parsed from the stream's result event.
-            plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
-            self.assertEqual(plan["files_to_modify"], ["README.md"])
-            events = read_events(data_dir, run_id)
-            plan_ready = next(e for e in events if e["type"] == "plan_ready")
-            self.assertEqual(
-                Path(plan_ready["transcript"]).resolve(),
-                planner_transcript.resolve(),
-            )
-
-            write_stub(fake_claude, BUILDER_STREAM_STUB)
             built = agentflow(
                 "advance",
                 run_id,
@@ -206,10 +133,22 @@ class WatchCommandTests(unittest.TestCase):
             self.assertEqual(json.loads(built.stdout)["state"], "built")
             builder_transcript = run_dir / "builder-1-transcript.jsonl"
             self.assertTrue(builder_transcript.is_file())
+            transcript_lines = [
+                json.loads(line)
+                for line in builder_transcript.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
             self.assertIn(
                 "editing the README",
                 builder_transcript.read_text(encoding="utf-8"),
             )
+            self.assertEqual(transcript_lines[-1]["type"], "result")
+            # Structured output is still parsed from the stream's result event.
+            report = json.loads(
+                (run_dir / "build-report-1.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["files_changed"], ["README.md"])
             events = read_events(data_dir, run_id)
             build_ready = next(e for e in events if e["type"] == "build_ready")
             self.assertEqual(

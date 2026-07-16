@@ -120,12 +120,11 @@ The command snapshots the Task Spec, repository path, and exact base commit;
 creates a unique Git branch and external worktree; and returns a run identifier
 in the `ready` state.
 
-Advance each stage from any process. Planning, building, testing, and review
+Advance each stage from any process. Building, testing, and review
 need an adapter; authoritative verification does not:
 
 ```bash
-agentflow advance <run-id> --adapter codex  # ready -> planned
-agentflow advance <run-id> --adapter codex  # planned -> built
+agentflow advance <run-id> --adapter codex  # ready -> built
 agentflow advance <run-id>                  # built -> verified or failed
 agentflow advance <run-id> --adapter codex  # verified -> tested or failed
 agentflow advance <run-id> --adapter codex  # tested -> awaiting_human
@@ -149,20 +148,9 @@ agentflow approve <run-id> --approved-by <identity>
 ```
 
 Rejection is likewise an explicit, human-attributed command
-(`agentflow reject <run-id> --rejected-by <identity> [--reason <text>]`). When a
-Run is blocked only because the planner omitted a file, widen the builder's
-allowed paths with an explicit amendment instead of abandoning the Run:
-
-```bash
-agentflow amend-plan <run-id> --add-path <repo-relative path> [--add-path ...] --amended-by <identity> [--reason <text>]
-```
-
-`amend-plan` is allowed only from `planned` or `changes_requested`. It appends a
-`plan_amended` event that widens the effective plan fed to the builder, repair,
-and reviewer stages without rewriting immutable `plan.json`; it never removes
-paths. Like `approve` and `reject`, it records explicit human direction —
-conversational agreement is never amendment evidence, so amend only when the
-human has explicitly directed it.
+(`agentflow reject <run-id> --rejected-by <identity> [--reason <text>]`),
+allowed only from `awaiting_human`, where it appends terminal `human_rejected`
+bound to the candidate SHA.
 
 `agentflow run examples/task.json` remains as a compatibility command for
 importing a JSON Task Spec into the same real kernel. It does not fabricate
@@ -184,7 +172,7 @@ The kernel owns run identity, immutable input snapshots, Repository Profile
 integrity, Git worktree isolation, schema validation, allowed paths,
 authoritative checks, append-only events, state replay, and approval bound to an
 exact candidate SHA. Claude, Cursor, Codex, and deterministic fake adapters
-support planner, builder, tester, and reviewer roles; Claude and Cursor
+support builder, tester, and reviewer roles; Claude and Cursor
 additionally provide live transcripts and model routing. The bounded builder-fix
 retry loop from a failing tester test, merge, post-merge verification, and
 deployment are later slices.

@@ -14,8 +14,6 @@ from typing import Callable, Mapping
 from .agent_adapter import AgentAdapter
 from .contracts import (
     validate_builder_report,
-    validate_plan,
-    validate_planned_paths,
     validate_review,
     validate_tester_report,
 )
@@ -200,37 +198,20 @@ def _artifact_path(run_dir: Path, event: dict, legacy_name: str) -> Path:
     return run_dir / legacy_name
 
 
-def _effective_plan(run_dir: Path) -> dict:
-    """Return the plan with ``files_to_modify`` widened by every amendment.
-
-    Loads and validates immutable ``plan.json``, then returns a NEW plan dict
-    whose ``files_to_modify`` is the sorted union of the original list and the
-    ``added_paths`` of every ``plan_amended`` event. Never writes ``plan.json``.
-    """
-    plan = validate_plan(
-        json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
-    )
-    added: set[str] = set()
-    for event in _read_events(run_dir):
-        if event["type"] == "plan_amended":
-            added.update(event["added_paths"])
-    if not added:
-        return plan
-    effective = dict(plan)
-    effective["files_to_modify"] = sorted(set(plan["files_to_modify"]) | added)
-    return effective
-
-
 def _enforce_builder_report(
     *,
-    plan: dict,
     report: dict,
     workspace: Path,
 ) -> list[str]:
+    """Confine the builder by self-consistency, not a pre-declared file list.
+
+    The builder's reported ``files_changed`` must equal the authoritative Git
+    diff, so it cannot misreport its scope, and it must report no unresolved
+    issues. What the change may touch is bounded by the real gate — authoritative
+    checks, the tester's acceptance-criteria tests, the read-only review of the
+    full diff, and exact-SHA human approval — not by a planner's guess.
+    """
     changed_files = _changed_files(workspace)
-    unexpected = sorted(set(changed_files) - set(plan["files_to_modify"]))
-    if unexpected:
-        raise ValueError(f"builder changed files outside the plan: {unexpected}")
     if sorted(report["files_changed"]) != changed_files:
         raise ValueError(
             "builder report files_changed does not match the authoritative Git diff"
@@ -392,6 +373,8 @@ def _advance_claimed_run(
     status = read_run_status(run_id=run_id, data_dir=data_dir)
     if status.state not in {
         "ready",
+        # 'planned' remains advanceable only so a legacy Run created before the
+        # planner was retired can still be built; new Runs go ready -> built.
         "planned",
         "built",
         "verified",
@@ -417,36 +400,6 @@ def _advance_claimed_run(
 
     task = json.loads((run_dir / "task.json").read_text(encoding="utf-8"))
     profile = json.loads(profile_bytes)
-    if status.state == "ready":
-        if adapter is None:
-            raise ValueError("the planner stage requires an Agent Adapter")
-        transcript_path = run_dir / "planner-transcript.jsonl"
-        plan = validate_plan(
-            adapter.invoke(
-                role="planner",
-                request={"profile": profile, "task": task},
-                workspace=workspace,
-                transcript_path=transcript_path,
-            )
-        )
-        validate_planned_paths(plan=plan, workspace=workspace)
-        artifact = run_dir / "plan.json"
-        artifact.write_text(
-            json.dumps(plan, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        append_event(
-            data_dir=data_dir,
-            holder=holder,
-            run_id=run_id,
-            event_type="plan_ready",
-            adapter=adapter.name,
-            artifact=str(artifact),
-            **_transcript_field(transcript_path),
-            **_model_provenance(adapter),
-        )
-        return AdvancedRun(run_id=run_id, state="planned", artifact=artifact)
-
     if status.state == "built":
         events = _read_events(run_dir)
         candidate_sha = _latest_candidate_sha(events)
@@ -546,9 +499,6 @@ def _advance_claimed_run(
                 role="tester",
                 request={
                     "checks": json.loads(checks_path.read_text(encoding="utf-8")),
-                    "plan": json.loads(
-                        (run_dir / "plan.json").read_text(encoding="utf-8")
-                    ),
                     "profile": profile,
                     "base_sha": status.base_sha,
                     "candidate_sha": candidate_sha,
@@ -698,7 +648,6 @@ def _advance_claimed_run(
                 role="reviewer",
                 request={
                     "checks": json.loads(checks_path.read_text(encoding="utf-8")),
-                    "plan": _effective_plan(run_dir),
                     "base_sha": status.base_sha,
                     "candidate_sha": candidate_sha,
                     "task": task,
@@ -799,7 +748,6 @@ def _advance_claimed_run(
             raise ValueError("Workspace HEAD no longer matches the candidate SHA")
         if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
             raise ValueError("Workspace is not clean at the candidate SHA")
-        plan = _effective_plan(run_dir)
         review_event = next(
             event for event in reversed(events) if event["type"] == "review_blocked"
         )
@@ -811,7 +759,6 @@ def _advance_claimed_run(
             adapter.invoke(
                 role="builder",
                 request={
-                    "plan": plan,
                     "profile": profile,
                     "task": task,
                     "review": review,
@@ -823,7 +770,7 @@ def _advance_claimed_run(
             )
         )
         _assert_workspace_guard(workspace, workspace_guard)
-        _enforce_builder_report(plan=plan, report=report, workspace=workspace)
+        _enforce_builder_report(report=report, workspace=workspace)
         artifact = run_dir / f"repair-report-{repair_attempt}.json"
         artifact.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -858,7 +805,6 @@ def _advance_claimed_run(
 
     if adapter is None:
         raise ValueError("the builder stage requires an Agent Adapter")
-    plan = _effective_plan(run_dir)
     events = _read_events(run_dir)
     generation = _candidate_generation(events) + 1
     transcript_path = run_dir / f"builder-{generation}-transcript.jsonl"
@@ -866,13 +812,13 @@ def _advance_claimed_run(
     report = validate_builder_report(
         adapter.invoke(
             role="builder",
-            request={"plan": plan, "profile": profile, "task": task},
+            request={"profile": profile, "task": task},
             workspace=workspace,
             transcript_path=transcript_path,
         )
     )
     _assert_workspace_guard(workspace, workspace_guard)
-    _enforce_builder_report(plan=plan, report=report, workspace=workspace)
+    _enforce_builder_report(report=report, workspace=workspace)
     artifact = run_dir / f"build-report-{generation}.json"
     artifact.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
