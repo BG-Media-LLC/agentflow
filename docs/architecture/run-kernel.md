@@ -16,7 +16,7 @@ agentflow run <task.json>
 agentflow advance <run-id> [--adapter claude|cursor|codex] [--model <model>] [--claim-lease-seconds <seconds>]
 agentflow models [--adapter claude|cursor --set <role>=<model>]
 agentflow status <run-id>
-agentflow watch <run-id>
+agentflow watch [<run-id>]
 agentflow list [--state <state>]
 agentflow approve <run-id> --approved-by <human identity>
 agentflow reject <run-id> --rejected-by <human identity> [--reason <text>]
@@ -106,7 +106,11 @@ agentflow reconcile [--adapter claude|cursor|codex|fake] [--repository <path>]
   (`awaiting_human`, `changes_requested`, `tests_failed`, `failed`, `abandoned`,
   `human_approved`, `plan_rejected`, or `human_rejected`). It exits promptly
   when that condition is already true and never creates or modifies any
-  evidence file.
+  evidence file. With no `run_id`, it lists live Runs on stderr as `state`,
+  truncated summary, and `short_id`, accepts an interactive selection by
+  1-based index or unambiguous short-id prefix on stdin, then follows the
+  chosen Run. A single live Run is selected automatically. Display labels are
+  never workflow authority.
 - `advance --model` pins the model for the single stage that invocation
   performs and is accepted with `--adapter claude` or `--adapter cursor`.
   Each routing adapter resolves a role's model in precedence order — explicit
@@ -165,10 +169,11 @@ agentflow reconcile [--adapter claude|cursor|codex|fake] [--repository <path>]
 - `list` replays every Run in Agentflow Home and prints a JSON array sorted by
   each Run's first event, so ordering is deterministic across invocations. Each
   entry carries the `status` fields `run_id`, `state`, `base_sha`, `summary`,
-  and `repository`, plus `candidate_sha` and `approved_sha` when present.
-  List stays concise and does not include `source` or `acceptance_criteria`.
-  `--state` filters to one state; a missing or empty runs directory prints an
-  empty array.
+  and `repository`, plus a `short_id` (the first eight characters of `run_id`)
+  for human display, and `candidate_sha` and `approved_sha` when present. The
+  full `run_id` remains the authoritative identifier. List stays concise and
+  does not include `source` or `acceptance_criteria`. `--state` filters to one
+  state; a missing or empty runs directory prints an empty array.
 - `approve` acquires the Run's stage claim, then re-reads state and re-verifies
   the Workspace is clean at the current candidate SHA under the claim before
   appending an explicit approval, only when replayed state is `awaiting_human`.

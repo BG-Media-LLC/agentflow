@@ -6,13 +6,22 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from test_advance_command import (
-    PROJECT_ROOT,
-    advance_tester,
-    agentflow,
-    create_profiled_run,
-    create_verified_run,
-)
+try:
+    from tests.test_advance_command import (
+        PROJECT_ROOT,
+        advance_tester,
+        agentflow,
+        create_profiled_run,
+        create_verified_run,
+    )
+except ImportError:  # unittest discover imports test modules without a package
+    from test_advance_command import (
+        PROJECT_ROOT,
+        advance_tester,
+        agentflow,
+        create_profiled_run,
+        create_verified_run,
+    )
 
 
 BUILDER_STREAM_STUB = """#!/usr/bin/env python3
@@ -201,6 +210,204 @@ class WatchCommandTests(unittest.TestCase):
             self.assertIn("reviewing the candidate", watched.stdout)
             # Ends with a final status line at the blocking state.
             self.assertIn(f"run {run_id} awaiting_human", watched.stdout)
+
+    def test_watch_without_run_id_lists_live_runs_and_follows_selection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = base_environment()
+            data_dir, awaiting_run = create_verified_run(temp_path, environment)
+            advance_tester(temp_path, data_dir, awaiting_run, environment)
+            fake_claude = temp_path / "claude"
+            write_stub(fake_claude, REVIEWER_STREAM_STUB)
+            reviewed = agentflow(
+                "advance",
+                awaiting_run,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment={**environment, "AGENTFLOW_CLAUDE": str(fake_claude)},
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            self.assertEqual(
+                json.loads(reviewed.stdout)["state"], "awaiting_human"
+            )
+
+            repository = temp_path / "target"
+            ready = agentflow(
+                "start",
+                "A second live run stays ready",
+                "--data-dir",
+                str(data_dir),
+                cwd=repository,
+                environment=environment,
+            )
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+            ready_run = json.loads(ready.stdout)["run_id"]
+            abandoned = agentflow(
+                "start",
+                "Abandoned runs stay out of the picker",
+                "--data-dir",
+                str(data_dir),
+                cwd=repository,
+                environment=environment,
+            )
+            self.assertEqual(abandoned.returncode, 0, abandoned.stderr)
+            abandoned_run = json.loads(abandoned.stdout)["run_id"]
+            drop = agentflow(
+                "abandon",
+                abandoned_run,
+                "--abandoned-by",
+                "watch-test",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(drop.returncode, 0, drop.stderr)
+
+            listed = agentflow(
+                "list",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            live_order = [
+                entry["run_id"]
+                for entry in json.loads(listed.stdout)
+                if entry["state"] in {"awaiting_human", "ready"}
+            ]
+            self.assertEqual(set(live_order), {awaiting_run, ready_run})
+            choice = live_order.index(awaiting_run) + 1
+
+            watched = agentflow(
+                "watch",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+                stdin=f"{choice}\n",
+            )
+
+            self.assertEqual(watched.returncode, 0, watched.stderr)
+            self.assertIn("awaiting_human", watched.stderr)
+            self.assertIn(awaiting_run[:8], watched.stderr)
+            self.assertNotIn(abandoned_run[:8], watched.stderr)
+            self.assertIn(f"run {awaiting_run} awaiting_human", watched.stdout)
+
+    def test_watch_without_run_id_auto_selects_a_single_live_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = base_environment()
+            data_dir, run_id = create_verified_run(temp_path, environment)
+            advance_tester(temp_path, data_dir, run_id, environment)
+            fake_claude = temp_path / "claude"
+            write_stub(fake_claude, REVIEWER_STREAM_STUB)
+            reviewed = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment={**environment, "AGENTFLOW_CLAUDE": str(fake_claude)},
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            self.assertEqual(
+                json.loads(reviewed.stdout)["state"], "awaiting_human"
+            )
+
+            watched = agentflow(
+                "watch",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertEqual(watched.returncode, 0, watched.stderr)
+            self.assertIn("watching", watched.stderr)
+            self.assertIn("awaiting_human", watched.stderr)
+            self.assertIn(run_id[:8], watched.stderr)
+            self.assertIn(f"run {run_id} awaiting_human", watched.stdout)
+
+    def test_watch_without_run_id_accepts_short_id_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = base_environment()
+            data_dir, awaiting_run = create_verified_run(temp_path, environment)
+            advance_tester(temp_path, data_dir, awaiting_run, environment)
+            fake_claude = temp_path / "claude"
+            write_stub(fake_claude, REVIEWER_STREAM_STUB)
+            reviewed = agentflow(
+                "advance",
+                awaiting_run,
+                "--adapter",
+                "claude",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment={**environment, "AGENTFLOW_CLAUDE": str(fake_claude)},
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            repository = temp_path / "target"
+            ready = agentflow(
+                "start",
+                "Another live run",
+                "--data-dir",
+                str(data_dir),
+                cwd=repository,
+                environment=environment,
+            )
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+
+            watched = agentflow(
+                "watch",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+                stdin=f"{awaiting_run[:8]}\n",
+            )
+
+            self.assertEqual(watched.returncode, 0, watched.stderr)
+            self.assertIn(f"run {awaiting_run} awaiting_human", watched.stdout)
+
+    def test_watch_without_live_runs_exits_with_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = base_environment()
+            repository, data_dir, run_id = create_profiled_run(
+                temp_path, environment
+            )
+            abandoned = agentflow(
+                "abandon",
+                run_id,
+                "--abandoned-by",
+                "watch-test",
+                "--data-dir",
+                str(data_dir),
+                cwd=repository,
+                environment=environment,
+            )
+            self.assertEqual(abandoned.returncode, 0, abandoned.stderr)
+
+            watched = agentflow(
+                "watch",
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+
+            self.assertEqual(watched.returncode, 2)
+            self.assertIn("no live runs to watch", watched.stderr)
 
     def test_watch_is_read_only_and_creates_no_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

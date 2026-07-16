@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .agent_adapter import AgentAdapter
-from .run_kernel import list_runs, read_run_status, start_run
+from .run_kernel import LIVE_RUN_STATES, list_runs, read_run_status, start_run
 from .work_graph import (
     compute_ready_work,
     completed_work_item_ids,
@@ -36,11 +36,9 @@ _ADVANCEABLE = frozenset(
         "tests_failed",
     }
 )
-# A Run in any other state either needs a human (awaiting_human) or is terminal.
-# changes_requested and tests_failed are advanceable via bounded builder repair,
-# so they are in _ADVANCEABLE above. Reconcile stops elsewhere and never calls
-# approve.
-_LIVE_RUN_STATES = _ADVANCEABLE | {"awaiting_human"}
+# Live Runs include advanceable states plus the human gate. Shared with the
+# watch picker via LIVE_RUN_STATES in run_kernel.
+_LIVE_RUN_STATES = LIVE_RUN_STATES
 
 # Defensive cap so a malformed state can never spin the per-Run loop forever;
 # a real Run reaches a human gate or terminal state well within this.

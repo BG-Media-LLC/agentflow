@@ -158,10 +158,12 @@ class ListCommandTests(unittest.TestCase):
                     entry["run_id"],
                     environment,
                 )
+                expected["short_id"] = entry["run_id"][:8]
                 self.assertEqual(entry, expected)
                 self.assertEqual(
                     entry["state"], state_by_run_id[entry["run_id"]]
                 )
+                self.assertEqual(entry["short_id"], entry["run_id"][:8])
                 self.assertEqual(len(entry["base_sha"]), 40)
                 self.assertIsInstance(entry["summary"], str)
                 self.assertIsInstance(entry["repository"], str)

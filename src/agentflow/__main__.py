@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 
 from .agent_adapter import (
     ROLES,
@@ -34,6 +35,8 @@ from .run_kernel import (
     read_run_status,
     rebase_run,
     reject_run,
+    select_live_run,
+    short_run_id,
     start_run,
 )
 from .reconcile import reconcile
@@ -90,7 +93,14 @@ def main() -> int:
     status_parser.add_argument("run_id")
     status_parser.add_argument("--data-dir", type=Path)
     watch_parser = subcommands.add_parser("watch")
-    watch_parser.add_argument("run_id")
+    watch_parser.add_argument(
+        "run_id",
+        nargs="?",
+        help=(
+            "Run to follow; omit to pick interactively among live Runs "
+            "(state, truncated summary, short id)"
+        ),
+    )
     watch_parser.add_argument("--data-dir", type=Path)
     list_parser = subcommands.add_parser("list")
     list_parser.add_argument("--state")
@@ -253,10 +263,19 @@ def main() -> int:
         return 0
 
     if args.command == "watch":
-        follow_run(
-            run_id=args.run_id,
-            data_dir=agentflow_home(args.data_dir),
-        )
+        data_dir = agentflow_home(args.data_dir)
+        run_id = args.run_id
+        if run_id is None:
+            try:
+                run_id = select_live_run(
+                    data_dir=data_dir,
+                    inp=sys.stdin,
+                    err=sys.stderr,
+                )
+            except RuntimeError as error:
+                print(str(error), file=sys.stderr)
+                return 2
+        follow_run(run_id=run_id, data_dir=data_dir)
         return 0
 
     if args.command == "list":
@@ -270,6 +289,7 @@ def main() -> int:
                 "base_sha": result.base_sha,
                 "repository": result.repository,
                 "run_id": result.run_id,
+                "short_id": short_run_id(result.run_id),
                 "state": result.state,
                 "summary": result.summary,
             }

@@ -17,6 +17,7 @@ def agentflow(
     *args: str,
     cwd: Path,
     environment: dict[str, str],
+    stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "agentflow", *args],
@@ -24,6 +25,7 @@ def agentflow(
         env=environment,
         text=True,
         capture_output=True,
+        input=stdin,
         check=False,
     )
 

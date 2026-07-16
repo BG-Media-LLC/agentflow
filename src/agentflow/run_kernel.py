@@ -41,6 +41,49 @@ TERMINAL_IMMUTABLE_STATES = frozenset(
     }
 )
 
+# Runs that are still in flight or waiting on a human — the watch picker and
+# reconcile's "live" notion. Failed / abandoned / approved / rejected are out.
+LIVE_RUN_STATES = frozenset(
+    {
+        "ready",
+        "planned",
+        "built",
+        "verified",
+        "tested",
+        "changes_requested",
+        "tests_failed",
+        "awaiting_human",
+    }
+)
+
+SHORT_RUN_ID_LENGTH = 8
+SUMMARY_DISPLAY_LENGTH = 60
+
+
+def short_run_id(run_id: str) -> str:
+    """Return a stable short prefix of a Run id for human display."""
+    return run_id[:SHORT_RUN_ID_LENGTH]
+
+
+def truncate_summary(
+    summary: str | None, *, max_length: int = SUMMARY_DISPLAY_LENGTH
+) -> str:
+    """Truncate a task summary for one-line display; full summary stays on status."""
+    text = (summary or "").strip() or "(no summary)"
+    if len(text) <= max_length:
+        return text
+    if max_length <= 1:
+        return "…"
+    return text[: max_length - 1] + "…"
+
+
+def format_run_choice(status: "RunStatus") -> str:
+    """One-line human label: state, truncated summary, short id."""
+    return (
+        f"{status.state}  {truncate_summary(status.summary)}  "
+        f"{short_run_id(status.run_id)}"
+    )
+
 # Must strictly exceed the adapter subprocess timeout plus the authoritative
 # check budget for a single stage, because the tester stage runs an adapter
 # invocation (3600-second timeout in agent_adapter.py) and then re-runs the
@@ -323,6 +366,57 @@ def _emit_new_lines(path: Path, offset: int, out: TextIO) -> int:
     out.write(complete.decode("utf-8"))
     out.flush()
     return offset + len(complete)
+
+
+def select_live_run(
+    *,
+    data_dir: Path,
+    inp: TextIO,
+    err: TextIO,
+) -> str:
+    """Prompt for a live Run and return its full ``run_id``.
+
+    Lists non-terminal Runs with state, truncated summary, and short id.
+    A single candidate is selected automatically. Selection is by 1-based
+    index or unambiguous short-id prefix. Read-only: creates no evidence.
+    """
+    candidates = [
+        run
+        for run in list_runs(data_dir=data_dir)
+        if run.state in LIVE_RUN_STATES
+    ]
+    if not candidates:
+        raise RuntimeError("no live runs to watch")
+    if len(candidates) == 1:
+        chosen = candidates[0]
+        err.write(f"watching {format_run_choice(chosen)}\n")
+        err.flush()
+        return chosen.run_id
+    for index, run in enumerate(candidates, start=1):
+        err.write(f"{index}. {format_run_choice(run)}\n")
+    err.write(f"Select run [1-{len(candidates)}]: ")
+    err.flush()
+    selection = inp.readline()
+    if selection == "":
+        raise RuntimeError("no run selected")
+    token = selection.strip()
+    if token.isdigit():
+        index = int(token)
+        if 1 <= index <= len(candidates):
+            return candidates[index - 1].run_id
+        raise RuntimeError(
+            f"selection out of range; expected 1-{len(candidates)}"
+        )
+    matches = [
+        run
+        for run in candidates
+        if run.run_id.startswith(token) or short_run_id(run.run_id) == token
+    ]
+    if len(matches) == 1:
+        return matches[0].run_id
+    if not matches:
+        raise RuntimeError(f"no live run matches {token!r}")
+    raise RuntimeError(f"ambiguous selection {token!r}; use the list index")
 
 
 def follow_run(
