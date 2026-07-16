@@ -39,6 +39,7 @@ from .run_kernel import (
     short_run_id,
     start_run,
 )
+from .projection import build_projection
 from .reconcile import reconcile
 from .workflow import advance_run
 
@@ -159,6 +160,15 @@ def main() -> int:
     work_parser.add_argument("mode", choices=("list", "ready"))
     work_parser.add_argument("--repository", type=Path, default=Path("."))
     work_parser.add_argument("--data-dir", type=Path)
+    project_parser = subcommands.add_parser(
+        "project",
+        help=(
+            "rebuild a read-only observability projection over Run Evidence "
+            "and the Work Graph"
+        ),
+    )
+    project_parser.add_argument("--repository", type=Path, default=Path("."))
+    project_parser.add_argument("--data-dir", type=Path)
     args = parser.parse_args()
 
     if args.command == "init":
@@ -440,6 +450,14 @@ def main() -> int:
             completed = completed_work_item_ids(agentflow_home(args.data_dir))
             graph = compute_ready_work(graph, completed)
         print(json.dumps(graph, sort_keys=True))
+        return 0
+
+    if args.command == "project":
+        projection = build_projection(
+            data_dir=agentflow_home(args.data_dir),
+            repository=args.repository,
+        )
+        print(json.dumps(projection, sort_keys=True))
         return 0
 
     if args.command == "reconcile":

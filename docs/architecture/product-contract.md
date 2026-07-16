@@ -298,11 +298,17 @@ Every behavior statement carries one of three classifications:
   marker before each bounded output attempt. The fake and Codex adapters
   produce no transcript. Streaming does not change workflow state,
   verification rules, or approval authority.
+- **Implemented.** A read-only observability projection over Run Evidence and
+  the Work Graph (`agentflow project`): it renders runs, work, and evidence,
+  is rebuildable from events at any time, never writes, and is never consulted
+  as workflow authority — `advance` / `approve` / `start` derive state only
+  from event replay. Corrupt Run evidence is isolated like `list_runs`: invalid
+  JSON lines and undecodable bytes do not abort the whole projection, and valid
+  event lines before damage are preserved.
 - **Target.** Capability-based model routing across providers, beyond the
   Claude adapter's recorded per-role routing.
-- **Target.** A durable projection or UI over role transcripts beyond the
-  line-tailing `watch` command — for example, a structured activity view
-  spanning multiple Runs.
+- **Target.** A local read-only web UI over the observability projection for
+  runs, evidence, and live role transcripts.
 - **Target.** Automatic adapter self-provisioning: Agentflow detecting a
   missing adapter and building, testing, and landing one through its own
   workflow before use. Until this exists, adapters are built through

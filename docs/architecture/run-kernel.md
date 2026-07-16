@@ -111,6 +111,14 @@ agentflow reconcile [--adapter claude|cursor|codex|fake] [--repository <path>]
   1-based index or unambiguous short-id prefix on stdin, then follows the
   chosen Run. A single live Run is selected automatically. Display labels are
   never workflow authority.
+- `project` rebuilds a read-only observability projection over Run Evidence and
+  the Target Repository's Work Graph (`--repository` defaulting to the current
+  directory). It prints JSON with `runs`, `work` (items, ready, completed_ids),
+  and `evidence` (per-Run event lists). It never writes state and is never
+  consulted by `advance`, `approve`, or `start`. Corrupt `events.jsonl` content
+  is isolated: invalid JSON lines and undecodable bytes stop reading that Run's
+  further events but do not abort the projection, and valid lines before the
+  damage are preserved.
 - `advance --model` pins the model for the single stage that invocation
   performs and is accepted with `--adapter claude` or `--adapter cursor`.
   Each routing adapter resolves a role's model in precedence order — explicit
