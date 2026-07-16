@@ -20,9 +20,11 @@ from .contracts import (
 ROLE_INSTRUCTIONS = {
     "builder": (
         "Implement the Task Spec and its acceptance criteria in this "
-        "Workspace. Do not merge or push. Change only what the work requires "
-        "and return the required report; the report's files_changed must match "
-        "exactly what you changed."
+        "Workspace. Do not merge, push, or create git commits — leave every "
+        "change uncommitted so Agentflow can create the candidate commit. "
+        "Change only what the work requires and return the required report; "
+        "the report's files_changed must match exactly what you changed "
+        "(the authoritative git status of this Workspace)."
     ),
     "reviewer": (
         "Review the candidate against the task, acceptance criteria, and "
