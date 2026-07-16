@@ -6,6 +6,11 @@ in Run Evidence. The two keep only references to each other — a Run records th
 ``work_item_id`` it captured, and completion is derived from Run Evidence rather
 than stored back into the graph. Ready work is computed from dependency
 relationships whenever it is needed, never persisted as a mutable value.
+
+Persistence goes through a replaceable ``WorkGraphBackend``. The default is the
+native JSONL store; an in-memory backend exists for tests and adapters. Backend
+swaps change only storage — validation and ready-work semantics stay in this
+module.
 """
 
 from __future__ import annotations
@@ -13,11 +18,94 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Protocol
 
 from .contracts import ContractError, validate_work_graph
 from .run_kernel import list_runs
 
 WORK_RELATIVE_DIR = Path(".agentflow/work")
+DEFAULT_GRAPH_FILENAME = "graph.jsonl"
+
+
+class WorkGraphBackend(Protocol):
+    """Replaceable persistence for Work Graph items.
+
+    Backends own storage only. Callers validate with ``validate_work_graph``
+    before write and after read so swapping implementations cannot change
+    Work Graph semantics.
+    """
+
+    def read_items(self) -> list[dict]:
+        """Return stored Work Item dicts, without validating the graph."""
+        ...
+
+    def write_items(self, items: list[dict]) -> None:
+        """Fully replace the stored Work Item set with ``items``."""
+        ...
+
+
+class InMemoryWorkGraphBackend:
+    """Full-replace in-memory Work Graph store."""
+
+    def __init__(self, items: list[dict] | None = None) -> None:
+        self._items: list[dict] = [dict(item) for item in (items or [])]
+
+    def read_items(self) -> list[dict]:
+        return [dict(item) for item in self._items]
+
+    def write_items(self, items: list[dict]) -> None:
+        self._items = [dict(item) for item in items]
+
+
+class JsonlWorkGraphBackend:
+    """Native JSONL Work Graph store under ``.agentflow/work/``.
+
+    Reads every ``*.jsonl`` file in deterministic order. ``write_items`` deletes
+    all existing ``*.jsonl`` files and writes the replacement set to
+    ``graph.jsonl``, matching the in-memory backend's full-replace semantics.
+    """
+
+    def __init__(self, repository: Path) -> None:
+        self._repository = repository
+        self._work_dir = repository / WORK_RELATIVE_DIR
+
+    def read_items(self) -> list[dict]:
+        if not self._work_dir.is_dir():
+            return []
+        items: list[dict] = []
+        for path in sorted(self._work_dir.glob("*.jsonl")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if not line.strip():
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except json.JSONDecodeError as error:
+                    raise ContractError(
+                        f"{path.name}:{line_number} is not valid JSON"
+                    ) from error
+        return items
+
+    def write_items(self, items: list[dict]) -> None:
+        self._work_dir.mkdir(parents=True, exist_ok=True)
+        for path in self._work_dir.glob("*.jsonl"):
+            path.unlink()
+        if not items:
+            return
+        target = self._work_dir / DEFAULT_GRAPH_FILENAME
+        target.write_text(
+            "".join(
+                json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n"
+                for item in items
+            ),
+            encoding="utf-8",
+        )
+
+
+def default_work_graph_backend(repository: Path) -> JsonlWorkGraphBackend:
+    """Default Work Graph persistence for a Target Repository."""
+    return JsonlWorkGraphBackend(repository)
 
 
 def work_item_content_hash(item: dict) -> str:
@@ -30,31 +118,43 @@ def work_item_content_hash(item: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def load_work_graph(repository: Path) -> list[dict]:
-    """Load and validate the Work Graph from a Target Repository.
+def load_work_graph(
+    repository: Path | None = None,
+    *,
+    backend: WorkGraphBackend | None = None,
+) -> list[dict]:
+    """Load and validate the Work Graph via a Work Graph backend.
 
-    Reads every ``*.jsonl`` file under ``.agentflow/work/`` in deterministic
-    order, one Work Item per non-blank line, and validates the aggregate graph
-    (unique ids, resolvable dependencies, no cycles). A missing directory is an
+    Uses the JSONL store for ``repository`` when ``backend`` is omitted.
+    Validation (unique ids, resolvable dependencies, no cycles) always runs
+    here so backend swaps cannot change graph semantics. A missing store is an
     empty graph.
     """
-    work_dir = repository / WORK_RELATIVE_DIR
-    if not work_dir.is_dir():
-        return []
-    items: list[dict] = []
-    for path in sorted(work_dir.glob("*.jsonl")):
-        for line_number, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if not line.strip():
-                continue
-            try:
-                items.append(json.loads(line))
-            except json.JSONDecodeError as error:
-                raise ContractError(
-                    f"{path.name}:{line_number} is not valid JSON"
-                ) from error
-    return validate_work_graph(items)
+    store = backend if backend is not None else default_work_graph_backend(
+        repository if repository is not None else Path.cwd()
+    )
+    return validate_work_graph(store.read_items())
+
+
+def save_work_graph(
+    items: list[dict],
+    repository: Path | None = None,
+    *,
+    backend: WorkGraphBackend | None = None,
+) -> list[dict]:
+    """Validate then fully replace the Work Graph via a Work Graph backend.
+
+    Uses the JSONL store for ``repository`` when ``backend`` is omitted.
+    ``write_items`` replaces the entire stored set; validation runs before the
+    write so invalid graphs never persist and backend swaps cannot change
+    semantics.
+    """
+    validated = validate_work_graph(items)
+    store = backend if backend is not None else default_work_graph_backend(
+        repository if repository is not None else Path.cwd()
+    )
+    store.write_items(validated)
+    return validated
 
 
 def completed_work_item_ids(data_dir: Path) -> set[str]:

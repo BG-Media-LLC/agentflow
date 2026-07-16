@@ -14,7 +14,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from agentflow.contracts import ContractError, validate_work_graph  # noqa: E402
 from agentflow.work_graph import (  # noqa: E402
+    InMemoryWorkGraphBackend,
+    JsonlWorkGraphBackend,
     compute_ready_work,
+    load_work_graph,
+    save_work_graph,
     work_item_content_hash,
 )
 
@@ -67,6 +71,89 @@ class WorkGraphContractTests(unittest.TestCase):
     def test_unknown_field_rejected(self) -> None:
         with self.assertRaises(ContractError):
             validate_work_graph([{"id": "a", "summary": "A", "status": "done"}])
+
+
+class WorkGraphBackendTests(unittest.TestCase):
+    def test_jsonl_is_default_backend_for_load_and_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir) / "repo"
+            items = [_item("a"), _item("b", ["a"])]
+            saved = save_work_graph(items, repository)
+            self.assertEqual([item["id"] for item in saved], ["a", "b"])
+            loaded = load_work_graph(repository)
+            self.assertEqual(loaded, saved)
+            graph_path = repository / ".agentflow" / "work" / "graph.jsonl"
+            self.assertTrue(graph_path.is_file())
+
+    def test_swapping_backend_preserves_validation(self) -> None:
+        invalid = [_item("a", ["ghost"])]
+        memory = InMemoryWorkGraphBackend()
+        with self.assertRaises(ContractError):
+            save_work_graph(invalid, backend=memory)
+        self.assertEqual(memory.read_items(), [])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir) / "repo"
+            with self.assertRaises(ContractError):
+                save_work_graph(invalid, repository)
+            self.assertEqual(
+                JsonlWorkGraphBackend(repository).read_items(), []
+            )
+
+    def test_write_items_fully_replaces_all_jsonl_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir) / "repo"
+            work_dir = repository / ".agentflow" / "work"
+            work_dir.mkdir(parents=True)
+            (work_dir / "alpha.jsonl").write_text(
+                json.dumps(_item("old-a")) + "\n", encoding="utf-8"
+            )
+            (work_dir / "beta.jsonl").write_text(
+                json.dumps(_item("old-b")) + "\n", encoding="utf-8"
+            )
+            backend = JsonlWorkGraphBackend(repository)
+            replacement = validate_work_graph([_item("new")])
+            backend.write_items(replacement)
+
+            remaining = sorted(path.name for path in work_dir.glob("*.jsonl"))
+            self.assertEqual(remaining, ["graph.jsonl"])
+            self.assertEqual(backend.read_items(), replacement)
+            self.assertEqual(load_work_graph(repository), replacement)
+
+    def test_jsonl_and_memory_full_replace_round_trips_match(self) -> None:
+        items = validate_work_graph([_item("a"), _item("b", ["a"])])
+        memory = InMemoryWorkGraphBackend([_item("stale")])
+        memory.write_items(items)
+        memory_round_trip = memory.read_items()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir) / "repo"
+            work_dir = repository / ".agentflow" / "work"
+            work_dir.mkdir(parents=True)
+            (work_dir / "stale.jsonl").write_text(
+                json.dumps(_item("stale")) + "\n", encoding="utf-8"
+            )
+            jsonl = JsonlWorkGraphBackend(repository)
+            jsonl.write_items(items)
+            jsonl_round_trip = jsonl.read_items()
+
+        self.assertEqual(memory_round_trip, items)
+        self.assertEqual(jsonl_round_trip, items)
+        self.assertEqual(memory_round_trip, jsonl_round_trip)
+
+        memory.write_items([])
+        self.assertEqual(memory.read_items(), [])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir) / "repo"
+            jsonl = JsonlWorkGraphBackend(repository)
+            jsonl.write_items(items)
+            jsonl.write_items([])
+            self.assertEqual(jsonl.read_items(), [])
+            self.assertEqual(
+                list((repository / ".agentflow" / "work").glob("*.jsonl")),
+                [],
+            )
 
 
 class ReadyWorkTests(unittest.TestCase):
