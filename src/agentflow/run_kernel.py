@@ -22,6 +22,7 @@ FOLLOW_TERMINAL_STATES = frozenset(
     {
         "awaiting_human",
         "changes_requested",
+        "tests_failed",
         "failed",
         "abandoned",
         "human_approved",
@@ -241,7 +242,7 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
         "checks_passed": "verified",
         "checks_failed": "failed",
         "tests_ready": "tested",
-        "tests_failed": "failed",
+        "tests_failed": "tests_failed",
         "repair_exhausted": "failed",
         "review_ready": "reviewed",
         "review_blocked": "changes_requested",

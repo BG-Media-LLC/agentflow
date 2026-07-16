@@ -26,11 +26,20 @@ from .workflow import advance_run
 # States from which `advance` performs another stage. Reconcile keeps advancing
 # a Run while it is in one of these.
 _ADVANCEABLE = frozenset(
-    {"ready", "planned", "built", "verified", "tested", "changes_requested"}
+    {
+        "ready",
+        "planned",
+        "built",
+        "verified",
+        "tested",
+        "changes_requested",
+        "tests_failed",
+    }
 )
-# A Run in any other state either needs a human (awaiting_human,
-# changes_requested is advanceable via repair, so it is not here) or is
-# terminal. Reconcile stops there and never calls approve.
+# A Run in any other state either needs a human (awaiting_human) or is terminal.
+# changes_requested and tests_failed are advanceable via bounded builder repair,
+# so they are in _ADVANCEABLE above. Reconcile stops elsewhere and never calls
+# approve.
 _LIVE_RUN_STATES = _ADVANCEABLE | {"awaiting_human"}
 
 # Defensive cap so a malformed state can never spin the per-Run loop forever;

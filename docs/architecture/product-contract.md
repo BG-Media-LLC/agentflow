@@ -104,16 +104,19 @@ Every behavior statement carries one of three classifications:
   checkout, pushes, or merges. Approval invalidation on rebase is inherent:
   approval binds to the exact candidate SHA, and a rebase produces a new SHA
   that must pass checks, review, and the `awaiting_human` gate again.
-- **Implemented.** Bounded repair out of `changes_requested`: while fewer than
-  `MAX_REPAIR_ATTEMPTS` (2) `repair_ready` events exist, `advance` invokes the
-  builder with the Task Spec, latest review, current candidate, and
-  one-based repair attempt; commits a new candidate; appends `repair_ready`;
-  and re-enters `built` so checks and review rerun. After two repairs, the next
-  repair attempt appends terminal `repair_exhausted` without invoking a model.
-  Each build, check, review, and repair writes a distinct attempt-scoped
-  artifact so earlier evidence is never overwritten. Attempt numbering also
-  advances on `candidate_rebased`, so checks and reviews after a rebase cannot
-  overwrite pre-rebase artifacts.
+- **Implemented.** Bounded repair out of `changes_requested` and `tests_failed`:
+  while fewer than `MAX_REPAIR_ATTEMPTS` (2) `repair_ready` events exist,
+  `advance` invokes the builder with the Task Spec, the current candidate, the
+  one-based repair attempt, and the trigger-specific evidence (the latest review
+  from `changes_requested`, or the failing post-tests checks and tester findings
+  from `tests_failed`); commits a new candidate; appends `repair_ready`; and
+  re-enters `built` so checks, the tester, and review rerun. The `repair_ready`
+  budget is shared across both triggers. After two repairs, the next repair
+  attempt appends terminal `repair_exhausted` without invoking a model. Each
+  build, check, review, and repair writes a distinct attempt-scoped artifact so
+  earlier evidence is never overwritten. Attempt numbering also advances on
+  `candidate_rebased`, so checks and reviews after a rebase cannot overwrite
+  pre-rebase artifacts.
 - **Implemented.** Explicit rejection: claim-guarded `reject` with required
   `--rejected-by` and optional `--reason`. From `awaiting_human` it appends
   terminal `human_rejected` bound to the candidate SHA. Rejection conversation
@@ -125,12 +128,12 @@ Every behavior statement carries one of three classifications:
   production code, enforced by the kernel against the authoritative Git diff. If
   it writes tests it commits a new candidate and re-runs the authoritative checks
   into a distinct `checks-<G>-post-tests.json`, reaching `tested` on pass and the
-  terminal `failed` on failure; if it writes nothing it reaches `tested` against
-  the unchanged candidate without re-running checks. Its prose findings are
-  recorded and surfaced to the reviewer but never gate the workflow on their own.
-  A run lacking declared `test_paths` fails the stage deterministically.
-- **Target.** A bounded builder-fix retry loop from
-  tester failures, a constrained Merge Agent, and Post-Merge Verification. Merge
+  non-terminal, repairable `tests_failed` on failure; if it writes nothing it
+  reaches `tested` against the unchanged candidate without re-running checks. Its
+  prose findings are recorded and surfaced to the reviewer but never gate the
+  workflow on their own. A run lacking declared `test_paths` fails the stage
+  deterministically.
+- **Target.** A constrained Merge Agent and Post-Merge Verification. Merge
   and deployment remain manual after approval until these exist.
 - **Target.** Reconciliation and Workspace cleanup after abandonment.
 

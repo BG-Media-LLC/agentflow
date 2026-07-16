@@ -72,8 +72,10 @@ agentflow reconcile [--adapter claude|cursor|codex|fake] [--repository <path>]
   (never overwriting `checks-<G>.json`), and on pass appends `tests_ready` (new
   `candidate_sha`, post-tests `checks_artifact`) → `tested`, or on failure appends
   `tests_failed` (new `candidate_sha`, post-tests `checks_artifact`, and the
-  tester findings) → `failed`, exactly like `checks_failed`. Tester findings are
-  evidence only: a blocker finding without a failing test never changes state.
+  tester findings) → the non-terminal `tests_failed` state, from which the
+  builder can repair (below). Unlike `checks_failed`, `tests_failed` is not
+  terminal. Tester findings are evidence only: a blocker finding without a
+  failing test never changes state.
 - From `tested`, `advance` runs the reviewer. It resolves the candidate SHA and
   check evidence from the latest `tests_ready` event (which always carries both),
   requires the Workspace to be clean at that tester-produced candidate, passes the
@@ -101,7 +103,7 @@ agentflow reconcile [--adapter claude|cursor|codex|fake] [--repository <path>]
   the Run's `events.jsonl` and to whichever `<role>-transcript.jsonl` is
   growing, projecting Run State each poll, and prints a final status line and
   exits once the Run reaches a state requiring external action
-  (`awaiting_human`, `changes_requested`, `failed`, `abandoned`,
+  (`awaiting_human`, `changes_requested`, `tests_failed`, `failed`, `abandoned`,
   `human_approved`, `plan_rejected`, or `human_rejected`). It exits promptly
   when that condition is already true and never creates or modifies any
   evidence file.
@@ -125,6 +127,17 @@ agentflow reconcile [--adapter claude|cursor|codex|fake] [--repository <path>]
   and becomes `failed` without invoking a model. Build, check, review, and
   repair reports and transcripts are attempt-scoped so earlier evidence is
   never overwritten; legacy flat artifact paths remain replayable.
+- From `tests_failed`, `advance` performs the identical bounded repair loop as
+  `changes_requested`, driven by the same `repair_ready`/`repair_exhausted`
+  machinery and `MAX_REPAIR_ATTEMPTS` budget. Instead of a review it passes the
+  builder the failing post-tests checks and the tester findings from the latest
+  `tests_failed` event, commits a new candidate, appends `repair_ready`, and
+  re-enters `built` so checks, the tester, and review all rerun (the tester's
+  committed failing test is part of the candidate, so a correct repair turns it
+  green). The `repair_ready` budget is shared across both triggers, so total
+  builder repairs after the initial build are bounded regardless of why each was
+  needed; exhausting it appends `repair_exhausted` → `failed` without invoking a
+  model, exactly as from `changes_requested`.
 - `models` honors `--data-dir` and, with no arguments, prints a sorted JSON
   object mapping each model-routing adapter (`claude` and `cursor`) to its
   `recorded` routing from `models.json` (an empty object when nothing is
@@ -269,7 +282,7 @@ every other Run. State is projected from event type:
 | `checks_passed` | `verified` |
 | `checks_failed` | `failed` |
 | `tests_ready` | `tested` |
-| `tests_failed` | `failed` |
+| `tests_failed` | `tests_failed` |
 | `repair_exhausted` | `failed` |
 | `review_blocked` | `changes_requested` |
 | `review_ready` | `reviewed` |
@@ -443,9 +456,12 @@ the only claim authority: no lock file or second store of claim state exists.
 - Rejection requires an explicit command and identity; conversation text is
   never rejection evidence. `human_rejected` is terminal (legacy `plan_rejected`
   remains terminal on replay).
-- A candidate may be repaired from `changes_requested` at most
-  `MAX_REPAIR_ATTEMPTS` times; each repair commits a new candidate, preserves
-  prior attempt artifacts, and re-enters `built` for checks and review.
+- A candidate may be repaired from `changes_requested` or `tests_failed` at
+  most `MAX_REPAIR_ATTEMPTS` times combined; each repair commits a new
+  candidate, preserves prior attempt artifacts, and re-enters `built` for
+  checks, the tester, and review. `tests_failed` is not terminal (unlike
+  `checks_failed`); exhausting the shared repair budget appends
+  `repair_exhausted` → `failed` without invoking a model.
 - A candidate may be rebased onto the Target Repository's advanced main only
   from a state with a committed candidate, only inside the Workspace, and never
   against the Target Repository's primary checkout; an up-to-date Run appends no
@@ -471,10 +487,10 @@ the only claim authority: no lock file or second store of claim state exists.
   tester, and relies on prompt-plus-local-validation with a two-attempt bound for
   output contracts.
 - The Tester Agent Role runs after authoritative checks pass and before review,
-  writing tests only under the profile's declared `test_paths`. The repair loop
-  from a `tests_failed` state is deferred: a failing tester test currently ends
-  the Run at `failed`, exactly like `checks_failed`. No merger or deployment
-  adapter exists.
+  writing tests only under the profile's declared `test_paths`. A failing tester
+  test enters the `tests_failed` state and drives the same bounded builder
+  repair loop as `changes_requested` (sharing the `MAX_REPAIR_ATTEMPTS` budget).
+  No merger or deployment adapter exists.
 - Worktree and Workspace cleanup is not implemented: `abandon` records the
   terminal state but leaves the Run's Workspace and branch on disk.
 - `advance` performs one stage per invocation; configurable role policies are

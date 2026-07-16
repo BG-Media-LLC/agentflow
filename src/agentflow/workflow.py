@@ -323,6 +323,115 @@ def _run_profile_checks(
     return checks, all_passed
 
 
+def _advance_builder_repair(
+    *,
+    run_id: str,
+    data_dir: Path,
+    run_dir: Path,
+    adapter: AgentAdapter | None,
+    holder: str,
+    events: list[dict],
+    workspace: Path,
+    profile: dict,
+    task: dict,
+    builder_request_extra: Callable[[], dict],
+) -> AdvancedRun:
+    """Perform one bounded builder repair, shared by both repair triggers.
+
+    Both ``changes_requested`` (from ``review_blocked``) and ``tests_failed``
+    (from a failing tester test) drive the identical loop: while fewer than
+    ``MAX_REPAIR_ATTEMPTS`` ``repair_ready`` events exist, invoke the builder
+    against the current candidate, commit a new candidate, and re-enter ``built``
+    so checks, tester, and review rerun. The ``repair_ready`` budget is shared
+    across triggers, so total builder repairs after the initial build are
+    bounded regardless of why each repair was needed. Once the budget is spent,
+    the next attempt appends ``repair_exhausted`` and becomes ``failed`` without
+    invoking a model. ``builder_request_extra`` is a callable so the
+    trigger-specific evidence (the review, or the failing checks and tester
+    findings) is read only when a repair actually runs, never on exhaustion.
+    """
+    repair_count = sum(1 for event in events if event["type"] == "repair_ready")
+    if repair_count >= MAX_REPAIR_ATTEMPTS:
+        artifact = run_dir / "repair-exhausted.json"
+        artifact.write_text(
+            json.dumps(
+                {
+                    "max_repair_attempts": MAX_REPAIR_ATTEMPTS,
+                    "repair_ready_count": repair_count,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        append_event(
+            data_dir=data_dir,
+            holder=holder,
+            run_id=run_id,
+            event_type="repair_exhausted",
+            artifact=str(artifact),
+        )
+        return AdvancedRun(run_id=run_id, state="failed", artifact=artifact)
+    if adapter is None:
+        raise ValueError("the builder stage requires an Agent Adapter")
+    repair_attempt = repair_count + 1
+    candidate_sha = _latest_candidate_sha(events)
+    if _git("rev-parse", "HEAD", cwd=workspace) != candidate_sha:
+        raise ValueError("Workspace HEAD no longer matches the candidate SHA")
+    if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
+        raise ValueError("Workspace is not clean at the candidate SHA")
+    transcript_path = run_dir / f"builder-repair-{repair_attempt}-transcript.jsonl"
+    workspace_guard = _capture_workspace_guard(workspace)
+    report = validate_builder_report(
+        adapter.invoke(
+            role="builder",
+            request={
+                "profile": profile,
+                "task": task,
+                "candidate_sha": candidate_sha,
+                "repair_attempt": repair_attempt,
+                **builder_request_extra(),
+            },
+            workspace=workspace,
+            transcript_path=transcript_path,
+        )
+    )
+    _assert_workspace_guard(workspace, workspace_guard)
+    _enforce_builder_report(report=report, workspace=workspace)
+    artifact = run_dir / f"repair-report-{repair_attempt}.json"
+    artifact.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _git("add", "--all", cwd=workspace)
+    _git(
+        "commit",
+        "-m",
+        f"Agentflow run {run_id} repair {repair_attempt}",
+        cwd=workspace,
+    )
+    new_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
+    append_event(
+        data_dir=data_dir,
+        holder=holder,
+        run_id=run_id,
+        event_type="repair_ready",
+        adapter=adapter.name,
+        artifact=str(artifact),
+        candidate_sha=new_candidate_sha,
+        repair_attempt=repair_attempt,
+        **_transcript_field(transcript_path),
+        **_model_provenance(adapter),
+    )
+    return AdvancedRun(
+        run_id=run_id,
+        state="built",
+        artifact=artifact,
+        candidate_sha=new_candidate_sha,
+    )
+
+
 def advance_run(
     *,
     run_id: str,
@@ -381,6 +490,7 @@ def _advance_claimed_run(
         "verified",
         "tested",
         "changes_requested",
+        "tests_failed",
     }:
         raise ValueError(f"run {run_id} cannot advance from state {status.state}")
     if status.worktree is None:
@@ -617,7 +727,7 @@ def _advance_claimed_run(
         )
         return AdvancedRun(
             run_id=run_id,
-            state="failed",
+            state="tests_failed",
             artifact=post_artifact,
             candidate_sha=new_candidate_sha,
         )
@@ -715,90 +825,55 @@ def _advance_claimed_run(
 
     if status.state == "changes_requested":
         events = _read_events(run_dir)
-        repair_count = sum(1 for event in events if event["type"] == "repair_ready")
-        if repair_count >= MAX_REPAIR_ATTEMPTS:
-            artifact = run_dir / "repair-exhausted.json"
-            artifact.write_text(
-                json.dumps(
-                    {
-                        "max_repair_attempts": MAX_REPAIR_ATTEMPTS,
-                        "repair_ready_count": repair_count,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            append_event(
-                data_dir=data_dir,
-                holder=holder,
-                run_id=run_id,
-                event_type="repair_exhausted",
-                artifact=str(artifact),
-            )
-            return AdvancedRun(run_id=run_id, state="failed", artifact=artifact)
-        if adapter is None:
-            raise ValueError("the builder stage requires an Agent Adapter")
-        repair_attempt = repair_count + 1
-        candidate_sha = _latest_candidate_sha(events)
-        if _git("rev-parse", "HEAD", cwd=workspace) != candidate_sha:
-            raise ValueError("Workspace HEAD no longer matches the candidate SHA")
-        if _git("status", "--porcelain", "--untracked-files=all", cwd=workspace):
-            raise ValueError("Workspace is not clean at the candidate SHA")
         review_event = next(
             event for event in reversed(events) if event["type"] == "review_blocked"
         )
-        review_path = _artifact_path(run_dir, review_event, "review.json")
-        review = json.loads(review_path.read_text(encoding="utf-8"))
-        transcript_path = run_dir / f"builder-repair-{repair_attempt}-transcript.jsonl"
-        workspace_guard = _capture_workspace_guard(workspace)
-        report = validate_builder_report(
-            adapter.invoke(
-                role="builder",
-                request={
-                    "profile": profile,
-                    "task": task,
-                    "review": review,
-                    "candidate_sha": candidate_sha,
-                    "repair_attempt": repair_attempt,
-                },
-                workspace=workspace,
-                transcript_path=transcript_path,
-            )
-        )
-        _assert_workspace_guard(workspace, workspace_guard)
-        _enforce_builder_report(report=report, workspace=workspace)
-        artifact = run_dir / f"repair-report-{repair_attempt}.json"
-        artifact.write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        _git("add", "--all", cwd=workspace)
-        _git(
-            "commit",
-            "-m",
-            f"Agentflow run {run_id} repair {repair_attempt}",
-            cwd=workspace,
-        )
-        new_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
-        append_event(
+
+        def _review_extra() -> dict:
+            review_path = _artifact_path(run_dir, review_event, "review.json")
+            return {"review": json.loads(review_path.read_text(encoding="utf-8"))}
+
+        return _advance_builder_repair(
+            run_id=run_id,
             data_dir=data_dir,
+            run_dir=run_dir,
+            adapter=adapter,
             holder=holder,
-            run_id=run_id,
-            event_type="repair_ready",
-            adapter=adapter.name,
-            artifact=str(artifact),
-            candidate_sha=new_candidate_sha,
-            repair_attempt=repair_attempt,
-            **_transcript_field(transcript_path),
-            **_model_provenance(adapter),
+            events=events,
+            workspace=workspace,
+            profile=profile,
+            task=task,
+            builder_request_extra=_review_extra,
         )
-        return AdvancedRun(
+
+    if status.state == "tests_failed":
+        # Mirror the changes_requested repair loop for a failing tester test:
+        # the builder repairs the candidate against the failing checks and the
+        # tester findings, re-entering built so checks, tester, and review
+        # rerun. The repair budget is shared with review-triggered repairs.
+        events = _read_events(run_dir)
+        tests_failed_event = next(
+            event for event in reversed(events) if event["type"] == "tests_failed"
+        )
+
+        def _tests_failed_extra() -> dict:
+            checks_path = Path(tests_failed_event["checks_artifact"])
+            return {
+                "checks": json.loads(checks_path.read_text(encoding="utf-8")),
+                "tester_findings": tests_failed_event.get("findings", []),
+            }
+
+        return _advance_builder_repair(
             run_id=run_id,
-            state="built",
-            artifact=artifact,
-            candidate_sha=new_candidate_sha,
+            data_dir=data_dir,
+            run_dir=run_dir,
+            adapter=adapter,
+            holder=holder,
+            events=events,
+            workspace=workspace,
+            profile=profile,
+            task=task,
+            builder_request_extra=_tests_failed_extra,
         )
 
     if adapter is None:

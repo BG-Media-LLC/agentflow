@@ -86,6 +86,20 @@ TESTER_OUT_OF_PATH_FIXTURE = {
     }
 }
 
+# A builder repair that turns the tester's failing regression test green so the
+# re-run authoritative checks pass. Used to drive the tests_failed repair loop.
+BUILDER_TEST_REPAIR_FIXTURE = {
+    "builder": {
+        "output": {
+            "commands_run": [],
+            "files_changed": ["tests/test_regression.py"],
+            "steps_completed": ["P1"],
+            "unresolved_issues": [],
+        },
+        "writes": {"tests/test_regression.py": "print('regression fixed')\n"},
+    }
+}
+
 
 def _events(data_dir: Path, run_id: str) -> list[dict]:
     return [
@@ -1582,7 +1596,7 @@ raise SystemExit(7)
             self.assertEqual(replayed["state"], "tested")
             self.assertEqual(replayed["candidate_sha"], response["candidate_sha"])
 
-    def test_tester_failing_test_marks_run_failed_with_findings(self) -> None:
+    def test_tester_failing_test_marks_run_tests_failed_with_findings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
@@ -1607,7 +1621,10 @@ raise SystemExit(7)
             )
 
             self.assertEqual(advanced.returncode, 0, advanced.stderr)
-            self.assertEqual(json.loads(advanced.stdout)["state"], "failed")
+            # A failing tester test lands in tests_failed, a distinct advanceable
+            # state, so the builder can repair the candidate — not the terminal
+            # failed state, which checks_failed still uses.
+            self.assertEqual(json.loads(advanced.stdout)["state"], "tests_failed")
             post = json.loads(
                 (run_dir / "checks-1-post-tests.json").read_text(encoding="utf-8")
             )
@@ -1631,7 +1648,203 @@ raise SystemExit(7)
                 cwd=temp_path,
                 environment=environment,
             )
-            self.assertEqual(json.loads(status.stdout)["state"], "failed")
+            self.assertEqual(json.loads(status.stdout)["state"], "tests_failed")
+
+    def test_tests_failed_builder_repair_reenters_built_and_reruns_stages(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(
+                temp_path, environment, TEST_RUNNING_CHECK
+            )
+            run_dir = data_dir / "runs" / run_id
+
+            tests_failed = advance_tester(
+                temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
+            )
+            self.assertEqual(json.loads(tests_failed.stdout)["state"], "tests_failed")
+
+            fixture_path = temp_path / "adapter-fixture.json"
+            fixture_path.write_text(
+                json.dumps(BUILDER_TEST_REPAIR_FIXTURE), encoding="utf-8"
+            )
+            repaired = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(repaired.returncode, 0, repaired.stderr)
+            self.assertEqual(json.loads(repaired.stdout)["state"], "built")
+            self.assertTrue((run_dir / "repair-report-1.json").is_file())
+            repair_ready = next(
+                event
+                for event in reversed(_events(data_dir, run_id))
+                if event["type"] == "repair_ready"
+            )
+            self.assertEqual(repair_ready["repair_attempt"], 1)
+
+            # Checks rerun against the repaired candidate.
+            rechecked = agentflow(
+                "advance",
+                run_id,
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(rechecked.returncode, 0, rechecked.stderr)
+            self.assertEqual(json.loads(rechecked.stdout)["state"], "verified")
+
+            # The tester reruns.
+            retested = advance_tester(temp_path, data_dir, run_id, environment)
+            self.assertEqual(json.loads(retested.stdout)["state"], "tested")
+
+            # Review reruns and reaches the human gate.
+            fixture_path.write_text(
+                json.dumps({"reviewer": {"disposition": "approve", "findings": []}}),
+                encoding="utf-8",
+            )
+            reviewed = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(reviewed.returncode, 0, reviewed.stderr)
+            self.assertEqual(json.loads(reviewed.stdout)["state"], "awaiting_human")
+
+    def test_tests_failed_repair_exhaustion_without_third_model_invoke(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            environment = {**os.environ, "PYTHONPATH": str(PROJECT_ROOT / "src")}
+            data_dir, run_id = create_verified_run(
+                temp_path, environment, TEST_RUNNING_CHECK
+            )
+            run_dir = data_dir / "runs" / run_id
+            fixture_path = temp_path / "adapter-fixture.json"
+
+            tests_failed = advance_tester(
+                temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
+            )
+            self.assertEqual(json.loads(tests_failed.stdout)["state"], "tests_failed")
+
+            for _ in (1, 2):
+                fixture_path.write_text(
+                    json.dumps(BUILDER_TEST_REPAIR_FIXTURE), encoding="utf-8"
+                )
+                repaired = agentflow(
+                    "advance",
+                    run_id,
+                    "--adapter",
+                    "fake",
+                    "--adapter-fixture",
+                    str(fixture_path),
+                    "--data-dir",
+                    str(data_dir),
+                    cwd=temp_path,
+                    environment=environment,
+                )
+                self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                self.assertEqual(json.loads(repaired.stdout)["state"], "built")
+                self.assertEqual(
+                    agentflow(
+                        "advance",
+                        run_id,
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).returncode,
+                    0,
+                )
+                blocked = advance_tester(
+                    temp_path, data_dir, run_id, environment, TESTER_FAILING_FIXTURE
+                )
+                self.assertEqual(json.loads(blocked.stdout)["state"], "tests_failed")
+
+            # The budget is spent: the next advance must fail terminally without
+            # invoking a model, leaving the Workspace untouched.
+            fixture_path.write_text(
+                json.dumps(
+                    {
+                        "builder": {
+                            "output": {
+                                "commands_run": ["should-not-run"],
+                                "files_changed": ["tests/test_regression.py"],
+                                "steps_completed": ["P1"],
+                                "unresolved_issues": [],
+                            },
+                            "writes": {
+                                "tests/test_regression.py": (
+                                    "print('should not be written')\n"
+                                )
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            worktree = Path(
+                json.loads(
+                    agentflow(
+                        "status",
+                        run_id,
+                        "--data-dir",
+                        str(data_dir),
+                        cwd=temp_path,
+                        environment=environment,
+                    ).stdout
+                )["worktree"]
+            )
+            before = (worktree / "tests" / "test_regression.py").read_text(
+                encoding="utf-8"
+            )
+            exhausted = agentflow(
+                "advance",
+                run_id,
+                "--adapter",
+                "fake",
+                "--adapter-fixture",
+                str(fixture_path),
+                "--data-dir",
+                str(data_dir),
+                cwd=temp_path,
+                environment=environment,
+            )
+            self.assertEqual(exhausted.returncode, 0, exhausted.stderr)
+            self.assertEqual(json.loads(exhausted.stdout)["state"], "failed")
+            events = _events(data_dir, run_id)
+            self.assertEqual(
+                sum(1 for event in events if event["type"] == "repair_ready"), 2
+            )
+            self.assertTrue(
+                any(event["type"] == "repair_exhausted" for event in events)
+            )
+            self.assertFalse((run_dir / "repair-report-3.json").exists())
+            self.assertEqual(
+                (worktree / "tests" / "test_regression.py").read_text(
+                    encoding="utf-8"
+                ),
+                before,
+            )
+            self.assertNotIn("should not be written", before)
 
     def test_tester_change_outside_test_paths_fails_deterministically(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
