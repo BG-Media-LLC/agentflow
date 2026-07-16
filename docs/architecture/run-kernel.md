@@ -148,8 +148,12 @@ agentflow rebase <run-id>
   List stays concise and does not include `source` or `acceptance_criteria`.
   `--state` filters to one state; a missing or empty runs directory prints an
   empty array.
-- `approve` appends an explicit approval only when replayed state is
-  `awaiting_human`. Conversation text is not approval evidence.
+- `approve` acquires the Run's stage claim, then re-reads state and re-verifies
+  the Workspace is clean at the current candidate SHA under the claim before
+  appending an explicit approval, only when replayed state is `awaiting_human`.
+  The claim guard prevents a concurrent rebase from moving the candidate between
+  the check and the append, which would otherwise bind approval to a stale SHA.
+  Conversation text is not approval evidence.
 - `reject` acquires the Run's stage claim and appends a terminal rejection:
   from `planned`, `plan_rejected`; from `awaiting_human`, `human_rejected`
   bound to the candidate SHA. It requires `--rejected-by` and accepts optional
@@ -239,7 +243,16 @@ an override so they cannot contaminate a developer's real runs.
 ## Event contract
 
 New events contain a one-based `sequence` equal to their line number in
-`events.jsonl`. State is projected from event type:
+`events.jsonl`. The append that assigns each `sequence` computes it and writes
+the record under an exclusive advisory file lock (the same lock the claim
+operations use), so concurrent writers to one Run's log are serialized and
+sequence numbers stay contiguous — two racing appends can no longer collide on a
+number and make the log permanently unreplayable. A stage-result append made by
+a claim holder is refused if that holder no longer owns the active claim (for
+example after another process took over an expired lease), so a stale worker
+cannot overwrite the new holder's evidence. `list` isolates a single unreadable
+Run as an `unreadable` entry rather than propagating the failure and hiding
+every other Run. State is projected from event type:
 
 | Event | Resulting state |
 | --- | --- |

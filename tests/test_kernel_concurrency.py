@@ -13,6 +13,8 @@ import unittest
 PROJECT_ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
 from agentflow.run_kernel import (  # noqa: E402
     acquire_claim,
     append_event,
@@ -176,6 +178,56 @@ class KernelConcurrencyTests(unittest.TestCase):
             events = _events(data_dir, "run-moved")
             self.assertFalse(
                 any(event["type"] == "human_approved" for event in events)
+            )
+
+    def test_expired_holder_cannot_append_after_takeover(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "home"
+            run_id = "run-takeover"
+            _write_events(
+                data_dir / "runs" / run_id,
+                [{"run_id": run_id, "sequence": 1, "type": "run_created"}],
+            )
+
+            # A claims with a zero-length lease, so it is immediately expirable.
+            acquire_claim(
+                data_dir=data_dir,
+                run_id=run_id,
+                holder="worker-a",
+                lease_seconds=0,
+            )
+            # B takes over the expired claim later.
+            acquire_claim(
+                data_dir=data_dir,
+                run_id=run_id,
+                holder="worker-b",
+                now=datetime.now(timezone.utc) + timedelta(seconds=1),
+            )
+
+            # A, still executing its stage, must not be able to append now that
+            # B owns the claim.
+            with self.assertRaises(Exception):
+                append_event(
+                    data_dir=data_dir,
+                    run_id=run_id,
+                    event_type="build_ready",
+                    holder="worker-a",
+                )
+            events = _events(data_dir, run_id)
+            self.assertFalse(
+                any(event["type"] == "build_ready" for event in events)
+            )
+
+            # B, the current owner, can still append.
+            append_event(
+                data_dir=data_dir,
+                run_id=run_id,
+                event_type="build_ready",
+                holder="worker-b",
+            )
+            events = _events(data_dir, run_id)
+            self.assertTrue(
+                any(event["type"] == "build_ready" for event in events)
             )
 
     def test_list_runs_isolates_a_corrupt_run(self) -> None:

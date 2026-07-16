@@ -286,6 +286,7 @@ def advance_run(
             run_id=run_id,
             data_dir=data_dir,
             adapter=adapter,
+            holder=holder,
             clock=clock,
             monotonic=monotonic,
             environment_fingerprint=environment_fingerprint,
@@ -299,6 +300,7 @@ def _advance_claimed_run(
     run_id: str,
     data_dir: Path,
     adapter: AgentAdapter | None,
+    holder: str,
     clock: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] | None = None,
     environment_fingerprint: Callable[[], dict[str, str]] | None = None,
@@ -358,6 +360,7 @@ def _advance_claimed_run(
         )
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="plan_ready",
             adapter=adapter.name,
@@ -420,6 +423,7 @@ def _advance_claimed_run(
         state = "verified" if all_passed else "failed"
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type=event_type,
             artifact=str(artifact),
@@ -490,6 +494,7 @@ def _advance_claimed_run(
             # proves the unchanged candidate, so checks are not re-run.
             append_event(
                 data_dir=data_dir,
+                holder=holder,
                 run_id=run_id,
                 event_type="tests_ready",
                 adapter=adapter.name,
@@ -551,6 +556,7 @@ def _advance_claimed_run(
         if all_passed:
             append_event(
                 data_dir=data_dir,
+                holder=holder,
                 run_id=run_id,
                 event_type="tests_ready",
                 adapter=adapter.name,
@@ -568,6 +574,7 @@ def _advance_claimed_run(
             )
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="tests_failed",
             adapter=adapter.name,
@@ -638,6 +645,7 @@ def _advance_claimed_run(
         if review["disposition"] != "approve" or has_blocker:
             append_event(
                 data_dir=data_dir,
+                holder=holder,
                 run_id=run_id,
                 event_type="review_blocked",
                 adapter=adapter.name,
@@ -654,6 +662,7 @@ def _advance_claimed_run(
             )
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="review_ready",
             adapter=adapter.name,
@@ -664,6 +673,7 @@ def _advance_claimed_run(
         )
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="awaiting_human",
             candidate_sha=candidate_sha,
@@ -694,6 +704,7 @@ def _advance_claimed_run(
             )
             append_event(
                 data_dir=data_dir,
+                holder=holder,
                 run_id=run_id,
                 event_type="repair_exhausted",
                 artifact=str(artifact),
@@ -745,6 +756,7 @@ def _advance_claimed_run(
         new_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="repair_ready",
             adapter=adapter.name,
@@ -786,6 +798,7 @@ def _advance_claimed_run(
     candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
     append_event(
         data_dir=data_dir,
+        holder=holder,
         run_id=run_id,
         event_type="build_ready",
         adapter=adapter.name,

@@ -448,6 +448,7 @@ def approve_run(*, run_id: str, approved_by: str, data_dir: Path) -> Approval:
             )
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="human_approved",
             approved_by=approved_by,
@@ -483,6 +484,7 @@ def abandon_run(
             fields["reason"] = reason
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="run_abandoned",
             **fields,
@@ -519,6 +521,7 @@ def reject_run(
         if status.state == "planned":
             append_event(
                 data_dir=data_dir,
+                holder=holder,
                 run_id=run_id,
                 event_type="plan_rejected",
                 **fields,
@@ -534,6 +537,7 @@ def reject_run(
                 raise ValueError(f"run {run_id} has no rejectable candidate SHA")
             append_event(
                 data_dir=data_dir,
+                holder=holder,
                 run_id=run_id,
                 event_type="human_rejected",
                 rejected_sha=status.candidate_sha,
@@ -593,6 +597,7 @@ def amend_plan(
             fields["reason"] = reason
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="plan_amended",
             **fields,
@@ -619,6 +624,7 @@ def append_event(
     data_dir: Path,
     run_id: str,
     event_type: str,
+    holder: str | None = None,
     **fields: object,
 ) -> None:
     events_path = data_dir / "runs" / run_id / "events.jsonl"
@@ -628,7 +634,20 @@ def append_event(
     # numbers stay contiguous and equal to line position.
     with events_path.open("r+", encoding="utf-8") as events_file:
         fcntl.flock(events_file.fileno(), fcntl.LOCK_EX)
-        sequence = len(events_file.read().splitlines()) + 1
+        lines = events_file.read().splitlines()
+        if holder is not None:
+            # A stage result may be appended only by the process that still owns
+            # the active claim. If another process took over an expired claim,
+            # the current owner differs and this stale holder is refused, so it
+            # cannot overwrite the new holder's work.
+            active = _active_claim([json.loads(line) for line in lines])
+            if active is None or active.get("holder") != holder:
+                current = None if active is None else active.get("holder")
+                raise ValueError(
+                    f"run {run_id}: {holder} no longer holds the stage claim "
+                    f"(current holder: {current})"
+                )
+        sequence = len(lines) + 1
         event = {**fields, "sequence": sequence, "type": event_type}
         events_file.seek(0, os.SEEK_END)
         events_file.write(json.dumps(event, sort_keys=True) + "\n")
@@ -710,6 +729,7 @@ def rebase_run(*, run_id: str, data_dir: Path) -> RebasedRun:
         new_candidate_sha = _git("rev-parse", "HEAD", cwd=workspace)
         append_event(
             data_dir=data_dir,
+            holder=holder,
             run_id=run_id,
             event_type="candidate_rebased",
             new_base_sha=new_base_sha,
