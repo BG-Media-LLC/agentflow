@@ -206,6 +206,12 @@ agentflow rebase <run-id>
   state `built`, the existing checks and reviewer stages re-run against the new
   candidate and approval re-binds to the new SHA through the `awaiting_human`
   gate.
+- `work` reads the Target Repository's Work Graph (git-tracked JSONL under
+  `.agentflow/work/`, `--repository` defaulting to the current directory).
+  `work list` validates and prints the whole graph; `work ready` prints the Work
+  Items that are not yet complete and whose dependencies all are, deriving
+  completion from `human_approved` Runs in Agentflow Home. It is strictly
+  read-only over both the graph and Run Evidence and never writes state.
 
 ## Agentflow Home
 

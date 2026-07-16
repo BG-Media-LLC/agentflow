@@ -104,14 +104,19 @@ for the Work-Graph and reconciliation milestones below and is fixed first.
   expired claim; `list` isolates a single unreadable Run instead of failing
   wholesale. (GitHub issue #1.)
 
-## Later: framing and the warm/cold seam
+## In progress: framing and the warm/cold seam
 
-- An Agentflow-owned framing skill that runs warm in the operator's session,
-  produces efficient documentation and a Work Graph, and ends in human approval
-  of the graph (content-hashed, immutable). See ADR 0005.
-- Retire the cold planner stage; a Run begins at build against an approved Work
-  Item.
-- Spec-approval gate as recorded evidence, distinct from candidate approval.
+- **Done.** Work Item and Work Graph contracts (versioned; unique ids,
+  resolvable dependencies, no cycles) stored as git-tracked JSONL under
+  `.agentflow/work/`. Ready work computed from dependencies plus completion read
+  from Run Evidence (`agentflow work list` / `work ready`).
+- **Done.** An Agentflow-owned `framing` skill that runs warm in the operator's
+  session, composing the Matt Pocock skills (grill-with-docs → to-prd/to-spec →
+  to-tickets) into an approved Work Graph. See ADR 0005.
+- **Next.** Retire the cold planner stage; a Run begins at build against an
+  approved Work Item captured by id and content hash.
+- **Next.** Spec-approval gate as recorded evidence, distinct from candidate
+  approval; automatic dispatch of ready Work Items into gated Runs.
 
 ## Later: Workspace enforcement hardening
 

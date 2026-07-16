@@ -18,6 +18,11 @@ from .contracts import validate_task_spec
 from .project_setup import initialize_repository
 from .paths import agentflow_home
 from .repository_profile import create_repository_profile
+from .work_graph import (
+    compute_ready_work,
+    completed_work_item_ids,
+    load_work_graph,
+)
 from .run_kernel import (
     DEFAULT_CLAIM_LEASE_SECONDS,
     abandon_run,
@@ -117,6 +122,10 @@ def main() -> int:
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("task", type=Path)
     run_parser.add_argument("--data-dir", type=Path)
+    work_parser = subcommands.add_parser("work")
+    work_parser.add_argument("mode", choices=("list", "ready"))
+    work_parser.add_argument("--repository", type=Path, default=Path("."))
+    work_parser.add_argument("--data-dir", type=Path)
     args = parser.parse_args()
 
     if args.command == "init":
@@ -391,6 +400,14 @@ def main() -> int:
         if result.candidate_sha is not None:
             response["candidate_sha"] = result.candidate_sha
         print(json.dumps(response, sort_keys=True))
+        return 0
+
+    if args.command == "work":
+        graph = load_work_graph(args.repository)
+        if args.mode == "ready":
+            completed = completed_work_item_ids(agentflow_home(args.data_dir))
+            graph = compute_ready_work(graph, completed)
+        print(json.dumps(graph, sort_keys=True))
         return 0
 
     task = validate_task_spec(json.loads(args.task.read_text(encoding="utf-8")))

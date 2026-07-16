@@ -101,6 +101,102 @@ def validate_task_spec(value: Any) -> dict[str, Any]:
     return task
 
 
+_WORK_ITEM_FIELDS = ("id", "summary", "acceptance_criteria", "depends_on")
+
+
+def _validate_string_list(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ContractError(f"{label} must be a list of strings")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ContractError(f"{label} must be a list of strings")
+        trimmed = item.strip()
+        if not trimmed:
+            raise ContractError(f"{label} must not contain blank strings")
+        if trimmed in seen:
+            raise ContractError(f"{label} must not contain duplicates")
+        seen.add(trimmed)
+        result.append(trimmed)
+    return result
+
+
+def validate_work_item(value: Any) -> dict[str, Any]:
+    """Validate one Work Item.
+
+    A Work Item is one unit of intended work in a Target Repository's Work
+    Graph. ``depends_on`` lists the ids of Work Items that must complete first;
+    ready work is computed from these relationships rather than stored. Unknown
+    fields are rejected so the schema stays explicit and versionable.
+    """
+    if not isinstance(value, dict):
+        raise ContractError("work item must be an object")
+    unknown = set(value) - set(_WORK_ITEM_FIELDS)
+    if unknown:
+        raise ContractError(f"work item contains unknown fields: {sorted(unknown)}")
+    for field in ("id", "summary"):
+        if field not in value:
+            raise ContractError(f"work item {field} is required")
+        if not isinstance(value[field], str) or not value[field].strip():
+            raise ContractError(f"work item {field} must be a non-empty string")
+    criteria = _validate_string_list(
+        value.get("acceptance_criteria", []), "work item acceptance_criteria"
+    )
+    depends_on = _validate_string_list(
+        value.get("depends_on", []), "work item depends_on"
+    )
+    item_id = value["id"].strip()
+    if item_id in depends_on:
+        raise ContractError(f"work item {item_id} cannot depend on itself")
+    return {
+        "id": item_id,
+        "summary": value["summary"].strip(),
+        "acceptance_criteria": criteria,
+        "depends_on": depends_on,
+    }
+
+
+def validate_work_graph(items: Any) -> list[dict[str, Any]]:
+    """Validate a whole Work Graph: unique ids, resolvable deps, no cycles."""
+    if not isinstance(items, list):
+        raise ContractError("work graph must be a list of work items")
+    validated = [validate_work_item(item) for item in items]
+    ids = [item["id"] for item in validated]
+    duplicates = sorted({item_id for item_id in ids if ids.count(item_id) > 1})
+    if duplicates:
+        raise ContractError(f"work graph has duplicate ids: {duplicates}")
+    id_set = set(ids)
+    for item in validated:
+        missing = sorted(dep for dep in item["depends_on"] if dep not in id_set)
+        if missing:
+            raise ContractError(
+                f"work item {item['id']} depends on unknown ids: {missing}"
+            )
+    _reject_dependency_cycles(validated)
+    return validated
+
+
+def _reject_dependency_cycles(items: list[dict[str, Any]]) -> None:
+    graph = {item["id"]: item["depends_on"] for item in items}
+    # 0 = unvisited, 1 = on the current DFS path, 2 = fully explored.
+    state: dict[str, int] = {}
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        for dependency in graph[node]:
+            if state.get(dependency, 0) == 1:
+                raise ContractError(
+                    f"work graph has a dependency cycle involving {node}"
+                )
+            if state.get(dependency, 0) == 0:
+                visit(dependency)
+        state[node] = 2
+
+    for item_id in graph:
+        if state.get(item_id, 0) == 0:
+            visit(item_id)
+
 
 def contract_schema(role: str) -> dict[str, Any]:
     if role == "planner":

@@ -212,16 +212,30 @@ Every behavior statement carries one of three classifications:
 
 ## Work Graph
 
-- **Target.** Work Items are owned by the Target Repository and stored as
-  git-tracked JSONL under `.agentflow/work/`. Work-intent truth is born in
-  the Work Graph, execution truth in Run Evidence; each keeps only references
-  to the other, never copies.
-- **Target.** Ready work is computed from the Work Graph's dependency
-  relationships whenever it is needed, never stored as an independently
-  mutable value.
+- **Implemented.** Work Items are owned by the Target Repository and stored as
+  git-tracked JSONL under `.agentflow/work/`. Each Work Item is a versioned,
+  validated object (`id`, `summary`, `acceptance_criteria`, `depends_on`); the
+  Work Graph rejects duplicate ids, unresolvable dependencies, self-dependency,
+  and cycles. Work-intent truth is born in the Work Graph, execution truth in
+  Run Evidence; each keeps only references to the other, never copies — a Run
+  captures a Work Item by `work_item_id` and content hash.
+- **Implemented.** Ready work is computed from the Work Graph's dependency
+  relationships and the completion set whenever it is needed, never stored.
+  `agentflow work list` validates and prints the graph; `agentflow work ready`
+  prints the items that are not yet complete and whose dependencies all are.
+  Completion is read from Run Evidence: a Work Item is complete when a
+  `human_approved` Run captured it.
+- **Implemented.** Framing produces the Work Graph warm and interactively (the
+  Agentflow-owned framing skill composes grilling, documentation, and
+  decomposition) and ends in human approval before any Run consumes it; a cold
+  Run never invents its own decomposition or parallelism. See
+  [ADR 0005](../adr/0005-framing-is-warm-and-in-session.md).
 - **Target.** Agent Roles return structured Discoveries as part of their
   validated output contracts. Discoveries are applied to the Work Graph only
   by deterministic validation code; no agent mutates the Work Graph directly.
+- **Target.** Automatic dispatch of a ready Work Item into its own gated Run;
+  today ready work is computed and the operator starts each Run. Retiring the
+  cold planner stage in favor of framing is tracked with this work.
 
 ## Reconciliation
 
