@@ -393,7 +393,24 @@ def list_runs(*, data_dir: Path, state: str | None = None) -> list[RunStatus]:
         lines = events_path.read_text(encoding="utf-8").splitlines()
         if not lines:
             continue
-        status = read_run_status(run_id=run_dir.name, data_dir=data_dir)
+        try:
+            status = read_run_status(run_id=run_dir.name, data_dir=data_dir)
+        except Exception:
+            # A single unreadable Run must never hide every other Run. Surface
+            # it as an error entry rather than propagating. The atomic append is
+            # what prevents such corruption in the first place; this is defense
+            # in depth for pre-existing or externally damaged logs.
+            status = RunStatus(
+                run_id=run_dir.name,
+                state="unreadable",
+                summary=None,
+                repository=None,
+                base_sha=None,
+                worktree=None,
+                repository_profile_path=None,
+                candidate_sha=None,
+                approved_sha=None,
+            )
         keyed.append((lines[0], status))
     keyed.sort(key=lambda pair: pair[0])
     return [
@@ -404,33 +421,46 @@ def list_runs(*, data_dir: Path, state: str | None = None) -> list[RunStatus]:
 
 
 def approve_run(*, run_id: str, approved_by: str, data_dir: Path) -> Approval:
-    status = read_run_status(run_id=run_id, data_dir=data_dir)
-    if status.state != "awaiting_human":
-        raise ValueError(
-            f"run {run_id} cannot be approved from state {status.state}"
+    # Approval is claim-guarded like every other mutating command: acquire the
+    # stage claim, then re-read state and re-verify the Workspace is still clean
+    # at the current Candidate Revision under the claim before binding the
+    # approval. This prevents a concurrent rebase from moving the candidate
+    # between the check and the append, which would otherwise bind approval to a
+    # stale SHA.
+    holder = default_claim_holder()
+    acquire_claim(data_dir=data_dir, run_id=run_id, holder=holder)
+    try:
+        status = read_run_status(run_id=run_id, data_dir=data_dir)
+        if status.state != "awaiting_human":
+            raise ValueError(
+                f"run {run_id} cannot be approved from state {status.state}"
+            )
+        if status.candidate_sha is None or status.worktree is None:
+            raise ValueError(f"run {run_id} has no approvable candidate SHA")
+        workspace = Path(status.worktree)
+        head = _git("rev-parse", "HEAD", cwd=workspace)
+        dirty = _git(
+            "status", "--porcelain", "--untracked-files=all", cwd=workspace
         )
-    if status.candidate_sha is None or status.worktree is None:
-        raise ValueError(f"run {run_id} has no approvable candidate SHA")
-    workspace = Path(status.worktree)
-    head = _git("rev-parse", "HEAD", cwd=workspace)
-    dirty = _git("status", "--porcelain", "--untracked-files=all", cwd=workspace)
-    if head != status.candidate_sha or dirty:
-        raise ValueError(
-            f"run {run_id} Workspace no longer matches the verified candidate"
+        if head != status.candidate_sha or dirty:
+            raise ValueError(
+                f"run {run_id} Workspace no longer matches the verified candidate"
+            )
+        append_event(
+            data_dir=data_dir,
+            run_id=run_id,
+            event_type="human_approved",
+            approved_by=approved_by,
+            approved_sha=status.candidate_sha,
         )
-    append_event(
-        data_dir=data_dir,
-        run_id=run_id,
-        event_type="human_approved",
-        approved_by=approved_by,
-        approved_sha=status.candidate_sha,
-    )
-    return Approval(
-        run_id=run_id,
-        state="human_approved",
-        approved_by=approved_by,
-        approved_sha=status.candidate_sha,
-    )
+        return Approval(
+            run_id=run_id,
+            state="human_approved",
+            approved_by=approved_by,
+            approved_sha=status.candidate_sha,
+        )
+    finally:
+        release_claim(data_dir=data_dir, run_id=run_id, holder=holder)
 
 
 def abandon_run(
@@ -592,9 +622,15 @@ def append_event(
     **fields: object,
 ) -> None:
     events_path = data_dir / "runs" / run_id / "events.jsonl"
-    sequence = len(events_path.read_text(encoding="utf-8").splitlines()) + 1
-    event = {**fields, "sequence": sequence, "type": event_type}
-    with events_path.open("a", encoding="utf-8") as events_file:
+    # Compute the sequence number and write the record under the same advisory
+    # lock the claim operations use, so the read-count-then-append window is
+    # closed. Concurrent writers to one Run's log are serialized and sequence
+    # numbers stay contiguous and equal to line position.
+    with events_path.open("r+", encoding="utf-8") as events_file:
+        fcntl.flock(events_file.fileno(), fcntl.LOCK_EX)
+        sequence = len(events_file.read().splitlines()) + 1
+        event = {**fields, "sequence": sequence, "type": event_type}
+        events_file.seek(0, os.SEEK_END)
         events_file.write(json.dumps(event, sort_keys=True) + "\n")
 
 

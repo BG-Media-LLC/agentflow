@@ -12,6 +12,10 @@ A repository on which Agentflow performs work. Its domain glossary, architectura
 
 A target-local, versioned description of a Target Repository's structure, authoritative commands, and agent-relevant navigation. It is stored in the Target Repository; Agentflow retains only references and integrity metadata.
 
+## Framing
+
+The interactive phase in which a human and an Agentflow-owned skill together decide what to build — clarifying intent, surfacing edge cases, and producing efficient documentation and a Work Graph. Framing runs warm in the operator's main session rather than as a cold workflow stage; Agentflow owns its output contract and records its result, but does not host the conversation as a stage. Framing ends only when the human approves the resulting Work Graph, which is then content-hashed and immutable for the Runs that consume it.
+
 ## Task Spec
 
 The immutable statement of work captured when a Run begins. It may originate from a GitHub Issue or a local task file, but later edits to the source do not alter an active Run.
