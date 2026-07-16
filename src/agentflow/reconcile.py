@@ -36,10 +36,6 @@ _ADVANCEABLE = frozenset(
         "tests_failed",
     }
 )
-# Live Runs include advanceable states plus the human gate. Shared with the
-# watch picker via LIVE_RUN_STATES in run_kernel.
-_LIVE_RUN_STATES = LIVE_RUN_STATES
-
 # Defensive cap so a malformed state can never spin the per-Run loop forever;
 # a real Run reaches a human gate or terminal state well within this.
 _MAX_STEPS_PER_RUN = 24
@@ -101,7 +97,7 @@ def reconcile(
         live = [
             run
             for run in runs_by_item.get(item["id"], [])
-            if run.state in _LIVE_RUN_STATES
+            if run.state in LIVE_RUN_STATES
         ]
         if live:
             # A Run already exists for this item; advance it (unless it is

@@ -218,7 +218,7 @@ class _WebUIHandler(BaseHTTPRequestHandler):
                     self.wfile.write(frame.encode("utf-8"))
                 self.wfile.write(b": keep-alive\n\n")
                 self.wfile.flush()
-                time.sleep(self.server.poll_interval)
+                self.server.sleep(self.server.poll_interval)
         except (BrokenPipeError, ConnectionResetError):
             return
 
@@ -248,6 +248,8 @@ class AgentflowWebServer(ThreadingHTTPServer):
     daemon_threads = True
     #: Seconds between live-tail polls of a Run's evidence files.
     poll_interval = 0.5
+    #: Injectable so tests can drive the SSE live-tail loop without real time.
+    sleep: Callable[[float], None] = staticmethod(time.sleep)
 
     def __init__(
         self,

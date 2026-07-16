@@ -449,6 +449,16 @@ the only claim authority: no lock file or second store of claim state exists.
 - `src/agentflow/agent_adapter.py` — provider boundary and Claude, Cursor,
   Codex, and fake adapters.
 - `src/agentflow/workflow.py` — state-driven stage orchestration and checks.
+- `src/agentflow/reviewer.py` — deterministic gate logic and change detection
+  for the read-only reviewer.
+- `src/agentflow/work_graph.py` — Target-repository Work Graph: validation,
+  ready-work computation, and the replaceable storage backend.
+- `src/agentflow/reconcile.py` — single-pass dispatch of ready Work Items and
+  advancement of their Runs.
+- `src/agentflow/projection.py` — read-only observability projection over Run
+  Evidence and the Work Graph; never workflow authority.
+- `src/agentflow/web_ui.py` — local read-only web UI serving the projection
+  and live SSE transcript tails.
 - `src/agentflow/paths.py` — Agentflow Home resolution.
 - `src/agentflow/project_setup.py` — idempotent Target Repository setup.
 - `skills/agentflow/` — canonical distributable skill.

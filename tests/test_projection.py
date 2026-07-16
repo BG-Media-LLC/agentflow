@@ -801,6 +801,32 @@ class ProjectionCorruptionTests(unittest.TestCase):
             self.assertTrue(evidence["truncated"])
             self.assertEqual(evidence["events"], [created])
 
+    def test_partial_trailing_line_is_growth_not_damage(self) -> None:
+        """A last line without a newline is a concurrent append, not corruption."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            path = temp_path / "events.jsonl"
+            good = {"run_id": "run-x", "sequence": 1, "type": "run_created"}
+            partial = json.dumps(
+                {"run_id": "run-x", "sequence": 2, "type": "build_ready"}
+            )
+            path.write_text(
+                json.dumps(good) + "\n" + partial[: len(partial) // 2],
+                encoding="utf-8",
+            )
+            events, truncated = read_events_tolerant(path)
+            self.assertFalse(truncated)
+            self.assertEqual(events, [good])
+
+            # Once the writer finishes the line, it is read normally.
+            path.write_text(
+                json.dumps(good) + "\n" + partial + "\n",
+                encoding="utf-8",
+            )
+            events, truncated = read_events_tolerant(path)
+            self.assertFalse(truncated)
+            self.assertEqual(len(events), 2)
+
     def test_non_object_json_line_stops_reading_like_invalid_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

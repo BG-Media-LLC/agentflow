@@ -263,6 +263,34 @@ def start_run(
     return StartedRun(run_id=run_id, state="ready", worktree=worktree)
 
 
+# Canonical event -> Run State projection, shared with the read-only
+# observability projection so both read paths stay consistent.
+# Legacy 'plan_ready'/'plan_rejected'/'plan_amended' events (from before the
+# planner was retired) remain replayable: 'plan_ready'/'plan_rejected' keep
+# their entries below, and 'plan_amended' has none, so the
+# STATE_BY_EVENT.get(type, state) fallback leaves state unchanged for it.
+STATE_BY_EVENT = {
+    "run_created": "created",
+    "workspace_ready": "ready",
+    "plan_ready": "planned",
+    "build_ready": "built",
+    "repair_ready": "built",
+    "candidate_rebased": "built",
+    "checks_passed": "verified",
+    "checks_failed": "failed",
+    "tests_ready": "tested",
+    "tests_failed": "tests_failed",
+    "repair_exhausted": "failed",
+    "review_ready": "reviewed",
+    "review_blocked": "changes_requested",
+    "awaiting_human": "awaiting_human",
+    "human_approved": "human_approved",
+    "run_abandoned": "abandoned",
+    "plan_rejected": "plan_rejected",
+    "human_rejected": "human_rejected",
+}
+
+
 def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
     run_dir = data_dir / "runs" / run_id
     state = "unknown"
@@ -271,30 +299,6 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
     candidate_sha: str | None = None
     approved_sha: str | None = None
     rebased_base_sha: str | None = None
-    # Legacy 'plan_ready'/'plan_rejected'/'plan_amended' events (from before the
-    # planner was retired) remain replayable: 'plan_ready'/'plan_rejected' keep
-    # their entries below, and 'plan_amended' has none, so the
-    # state_by_event.get(type, state) fallback leaves state unchanged for it.
-    state_by_event = {
-        "run_created": "created",
-        "workspace_ready": "ready",
-        "plan_ready": "planned",
-        "build_ready": "built",
-        "repair_ready": "built",
-        "candidate_rebased": "built",
-        "checks_passed": "verified",
-        "checks_failed": "failed",
-        "tests_ready": "tested",
-        "tests_failed": "tests_failed",
-        "repair_exhausted": "failed",
-        "review_ready": "reviewed",
-        "review_blocked": "changes_requested",
-        "awaiting_human": "awaiting_human",
-        "human_approved": "human_approved",
-        "run_abandoned": "abandoned",
-        "plan_rejected": "plan_rejected",
-        "human_rejected": "human_rejected",
-    }
     for line_number, line in enumerate(
         (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines(),
         start=1,
@@ -306,7 +310,7 @@ def read_run_status(*, run_id: str, data_dir: Path) -> RunStatus:
                 f"invalid event sequence for run {run_id}: "
                 f"expected {line_number}, got {sequence}"
             )
-        state = state_by_event.get(event["type"], state)
+        state = STATE_BY_EVENT.get(event["type"], state)
         if event["type"] == "workspace_ready":
             worktree = event.get("worktree")
         if event["type"] == "repository_profile_captured":
@@ -560,7 +564,7 @@ def select_live_run(
         if run.state in LIVE_RUN_STATES
     ]
     if not candidates:
-        raise RuntimeError("no live runs to watch")
+        raise ValueError("no live runs to watch")
     if len(candidates) == 1:
         chosen = candidates[0]
         err.write(f"watching {format_run_choice(chosen)}\n")
@@ -572,13 +576,13 @@ def select_live_run(
     err.flush()
     selection = inp.readline()
     if selection == "":
-        raise RuntimeError("no run selected")
+        raise ValueError("no run selected")
     token = selection.strip()
     if token.isdigit():
         index = int(token)
         if 1 <= index <= len(candidates):
             return candidates[index - 1].run_id
-        raise RuntimeError(
+        raise ValueError(
             f"selection out of range; expected 1-{len(candidates)}"
         )
     matches = [
@@ -589,8 +593,8 @@ def select_live_run(
     if len(matches) == 1:
         return matches[0].run_id
     if not matches:
-        raise RuntimeError(f"no live run matches {token!r}")
-    raise RuntimeError(f"ambiguous selection {token!r}; use the list index")
+        raise ValueError(f"no live run matches {token!r}")
+    raise ValueError(f"ambiguous selection {token!r}; use the list index")
 
 
 def _format_event_line(line: str) -> list[str]:

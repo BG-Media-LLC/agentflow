@@ -13,31 +13,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .run_kernel import short_run_id
+from .run_kernel import STATE_BY_EVENT, short_run_id
 from .work_graph import compute_ready_work, load_work_graph
-
-# Mirrors read_run_status's projection table so the observability view stays
-# consistent with status without becoming an authority the workflow consults.
-_STATE_BY_EVENT = {
-    "run_created": "created",
-    "workspace_ready": "ready",
-    "plan_ready": "planned",
-    "build_ready": "built",
-    "repair_ready": "built",
-    "candidate_rebased": "built",
-    "checks_passed": "verified",
-    "checks_failed": "failed",
-    "tests_ready": "tested",
-    "tests_failed": "tests_failed",
-    "repair_exhausted": "failed",
-    "review_ready": "reviewed",
-    "review_blocked": "changes_requested",
-    "awaiting_human": "awaiting_human",
-    "human_approved": "human_approved",
-    "run_abandoned": "abandoned",
-    "plan_rejected": "plan_rejected",
-    "human_rejected": "human_rejected",
-}
 
 
 def _real_path(path: Path) -> Path | None:
@@ -138,10 +115,9 @@ def read_events_tolerant(events_path: Path) -> tuple[list[dict[str, Any]], bool]
     if not raw:
         return [], False
     parts = raw.split(b"\n")
-    # Drop the final empty segment produced by a trailing newline, or keep an
-    # incomplete last line for attempted decode (it may be incomplete JSON).
-    if parts and parts[-1] == b"":
-        parts = parts[:-1]
+    # The final segment is either empty (trailing newline) or a line still
+    # being written by a concurrent append; neither is damage, so drop it.
+    parts = parts[:-1]
     for part in parts:
         if not part.strip():
             continue
@@ -172,7 +148,7 @@ def _project_fields_from_events(
         event_type = event.get("type")
         if not isinstance(event_type, str):
             continue
-        state = _STATE_BY_EVENT.get(event_type, state)
+        state = STATE_BY_EVENT.get(event_type, state)
         if event_type == "workspace_ready":
             worktree = event.get("worktree")
         if event_type == "repository_profile_captured":

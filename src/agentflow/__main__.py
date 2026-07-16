@@ -294,7 +294,7 @@ def main() -> int:
                     inp=sys.stdin,
                     err=sys.stderr,
                 )
-            except RuntimeError as error:
+            except ValueError as error:
                 print(str(error), file=sys.stderr)
                 return 2
         follow_run(run_id=run_id, data_dir=data_dir)

@@ -192,8 +192,10 @@ def _candidate_generation(events: list[dict]) -> int:
     )
 
 
-def _artifact_path(run_dir: Path, event: dict, legacy_name: str) -> Path:
-    artifact = event.get("artifact")
+def _artifact_path(
+    run_dir: Path, event: dict, legacy_name: str, *, key: str = "artifact"
+) -> Path:
+    artifact = event.get(key)
     if artifact:
         return Path(artifact)
     return run_dir / legacy_name
@@ -740,7 +742,9 @@ def _advance_claimed_run(
             event for event in reversed(events) if event["type"] == "tests_ready"
         )
         candidate_sha = tests_event["candidate_sha"]
-        checks_path = Path(tests_event["checks_artifact"])
+        checks_path = _artifact_path(
+            run_dir, tests_event, "checks.json", key="checks_artifact"
+        )
         before_head = _git("rev-parse", "HEAD", cwd=workspace)
         before_status = _git(
             "status", "--porcelain", "--untracked-files=all", cwd=workspace
@@ -857,7 +861,9 @@ def _advance_claimed_run(
         )
 
         def _tests_failed_extra() -> dict:
-            checks_path = Path(tests_failed_event["checks_artifact"])
+            checks_path = _artifact_path(
+                run_dir, tests_failed_event, "checks.json", key="checks_artifact"
+            )
             return {
                 "checks": json.loads(checks_path.read_text(encoding="utf-8")),
                 "tester_findings": tests_failed_event.get("findings", []),

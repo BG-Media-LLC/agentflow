@@ -213,6 +213,16 @@ Every behavior statement carries one of three classifications:
   and cycles. Work-intent truth is born in the Work Graph, execution truth in
   Run Evidence; each keeps only references to the other, never copies — a Run
   captures a Work Item by `work_item_id` and content hash.
+- **Implemented.** Work Graph persistence sits behind a replaceable backend
+  interface (`WorkGraphBackend`: `read_items` / full-replace `write_items`),
+  with the git-tracked JSONL store as the default implementation and an
+  in-memory backend for tests. Backends own storage only: `load_work_graph`
+  and `save_work_graph` always validate, so swapping backends cannot change
+  Work Graph semantics. The JSONL backend's `write_items` deletes every
+  `*.jsonl` under `.agentflow/work/` and writes the replacement set to
+  `graph.jsonl`, so a save fully replaces a hand-split layout instead of
+  merging with it. The write path exists for upcoming Work Graph mutators
+  (structured Discoveries); today's production callers are read-only.
 - **Implemented.** Ready work is computed from the Work Graph's dependency
   relationships and the completion set whenever it is needed, never stored.
   `agentflow work list` validates and prints the graph; `agentflow work ready`
