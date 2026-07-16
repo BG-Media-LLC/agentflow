@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -184,6 +186,178 @@ class ProjectionRebuildTests(unittest.TestCase):
             }
             self.assertEqual(before, after)
 
+    def test_projection_rereads_events_on_each_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repository = temp_path / "target"
+            data_dir = temp_path / "home"
+            init_repository(repository)
+            save_work_graph([], repository)
+            run_dir = data_dir / "runs" / "run-live"
+            write_events(
+                run_dir,
+                json.dumps(
+                    {"run_id": "run-live", "sequence": 1, "type": "run_created"}
+                )
+                + "\n",
+            )
+            (run_dir / "task.json").write_text(
+                json.dumps({"summary": "Live"}),
+                encoding="utf-8",
+            )
+            (run_dir / "repository.json").write_text(
+                json.dumps(
+                    {"repository": str(repository), "base_sha": "base"}
+                ),
+                encoding="utf-8",
+            )
+
+            first = build_projection(data_dir=data_dir, repository=repository)
+            self.assertEqual(first["runs"][0]["state"], "created")
+
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "run_id": "run-live",
+                            "sequence": 2,
+                            "type": "build_ready",
+                            "candidate_sha": "cand",
+                        }
+                    )
+                    + "\n"
+                )
+
+            second = build_projection(data_dir=data_dir, repository=repository)
+            self.assertNotEqual(first, second)
+            self.assertEqual(second["runs"][0]["state"], "built")
+            self.assertEqual(second["runs"][0]["candidate_sha"], "cand")
+            self.assertEqual(len(second["evidence"][0]["events"]), 2)
+
+    def test_project_cli_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repository = temp_path / "target"
+            data_dir = temp_path / "home"
+            init_repository(repository)
+            commit_work_graph(
+                repository,
+                [
+                    {
+                        "id": "alpha",
+                        "summary": "First",
+                        "acceptance_criteria": ["a"],
+                        "depends_on": [],
+                    }
+                ],
+            )
+            started = run_agentflow(
+                "start",
+                "--work-item",
+                "alpha",
+                "--data-dir",
+                str(data_dir),
+                cwd=repository,
+            )
+            self.assertEqual(started.returncode, 0, started.stderr)
+            before = {
+                path.relative_to(temp_path): path.read_bytes()
+                for path in temp_path.rglob("*")
+                if path.is_file()
+            }
+            projected = run_agentflow(
+                "project",
+                "--repository",
+                str(repository),
+                "--data-dir",
+                str(data_dir),
+                cwd=repository,
+            )
+            self.assertEqual(projected.returncode, 0, projected.stderr)
+            after = {
+                path.relative_to(temp_path): path.read_bytes()
+                for path in temp_path.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(before, after)
+
+    def test_human_approved_run_drives_work_completion_from_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repository = temp_path / "target"
+            data_dir = temp_path / "home"
+            init_repository(repository)
+            save_work_graph(
+                [
+                    {
+                        "id": "alpha",
+                        "summary": "First",
+                        "acceptance_criteria": ["a"],
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "beta",
+                        "summary": "Second",
+                        "acceptance_criteria": ["b"],
+                        "depends_on": ["alpha"],
+                    },
+                ],
+                repository,
+            )
+            run_dir = data_dir / "runs" / "run-alpha"
+            write_events(
+                run_dir,
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in (
+                        {
+                            "run_id": "run-alpha",
+                            "sequence": 1,
+                            "type": "run_created",
+                        },
+                        {
+                            "run_id": "run-alpha",
+                            "sequence": 2,
+                            "type": "human_approved",
+                            "approved_sha": "approved",
+                        },
+                    )
+                ),
+            )
+            (run_dir / "task.json").write_text(
+                json.dumps(
+                    {
+                        "summary": "First",
+                        "source": {
+                            "provider": "work-graph",
+                            "work_item_id": "alpha",
+                            "content_hash": "hash",
+                            "captured_at": "2026-07-16T00:00:00+00:00",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "repository.json").write_text(
+                json.dumps(
+                    {"repository": str(repository), "base_sha": "base"}
+                ),
+                encoding="utf-8",
+            )
+
+            projection = build_projection(
+                data_dir=data_dir, repository=repository
+            )
+            self.assertEqual(projection["work"]["completed_ids"], ["alpha"])
+            self.assertEqual(
+                [item["id"] for item in projection["work"]["ready"]],
+                ["beta"],
+            )
+            self.assertEqual(
+                [item["id"] for item in projection["work"]["items"]],
+                ["alpha", "beta"],
+            )
+
 
 class ProjectionAuthorityTests(unittest.TestCase):
     def test_workflow_mutators_do_not_import_projection(self) -> None:
@@ -259,6 +433,54 @@ class ProjectionAuthorityTests(unittest.TestCase):
                 visitor.command_calls[command],
                 f"{command} must not consult the observability projection",
             )
+
+    def test_start_succeeds_when_build_projection_would_raise(self) -> None:
+        import agentflow.__main__ as main_mod
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repository = temp_path / "target"
+            data_dir = temp_path / "home"
+            init_repository(repository)
+            commit_work_graph(
+                repository,
+                [
+                    {
+                        "id": "alpha",
+                        "summary": "First",
+                        "acceptance_criteria": ["a"],
+                        "depends_on": [],
+                    }
+                ],
+            )
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(repository)
+                with patch.object(
+                    main_mod,
+                    "build_projection",
+                    side_effect=AssertionError(
+                        "start must not consult the observability projection"
+                    ),
+                ):
+                    with patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "agentflow",
+                            "start",
+                            "--work-item",
+                            "alpha",
+                            "--data-dir",
+                            str(data_dir),
+                        ],
+                    ):
+                        with patch.object(sys, "stdout", new_callable=io.StringIO):
+                            returncode = main_mod.main()
+            finally:
+                os.chdir(previous_cwd)
+            self.assertEqual(returncode, 0)
+            self.assertTrue((data_dir / "runs").is_dir())
 
 
 class ProjectionCorruptionTests(unittest.TestCase):
@@ -375,6 +597,227 @@ class ProjectionCorruptionTests(unittest.TestCase):
             )
             self.assertTrue(damaged_run["evidence_truncated"])
             self.assertEqual(damaged_run["state"], "created")
+
+    def test_undecodable_sibling_does_not_abort_work_projection(self) -> None:
+        """Work completion must come from projected evidence, not list_runs.
+
+        ``list_runs`` raises on undecodable bytes; the projection must still
+        render work (items, ready, completed_ids) from healthy approved Runs.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repository = temp_path / "target"
+            data_dir = temp_path / "home"
+            init_repository(repository)
+            save_work_graph(
+                [
+                    {
+                        "id": "alpha",
+                        "summary": "First",
+                        "acceptance_criteria": ["a"],
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "beta",
+                        "summary": "Second",
+                        "acceptance_criteria": ["b"],
+                        "depends_on": ["alpha"],
+                    },
+                ],
+                repository,
+            )
+
+            approved = data_dir / "runs" / "run-alpha"
+            write_events(
+                approved,
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in (
+                        {
+                            "run_id": "run-alpha",
+                            "sequence": 1,
+                            "type": "run_created",
+                        },
+                        {
+                            "run_id": "run-alpha",
+                            "sequence": 2,
+                            "type": "human_approved",
+                            "approved_sha": "approved",
+                        },
+                    )
+                ),
+            )
+            (approved / "task.json").write_text(
+                json.dumps(
+                    {
+                        "summary": "First",
+                        "source": {
+                            "provider": "work-graph",
+                            "work_item_id": "alpha",
+                            "content_hash": "hash",
+                            "captured_at": "2026-07-16T00:00:00+00:00",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (approved / "repository.json").write_text(
+                json.dumps(
+                    {"repository": str(repository), "base_sha": "base"}
+                ),
+                encoding="utf-8",
+            )
+
+            damaged = data_dir / "runs" / "run-damaged"
+            write_events(
+                damaged,
+                (
+                    json.dumps(
+                        {
+                            "run_id": "run-damaged",
+                            "sequence": 1,
+                            "type": "run_created",
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                + b"\xff\xfe corrupt sibling\n",
+            )
+            (damaged / "task.json").write_text(
+                json.dumps({"summary": "Damaged"}),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "agentflow.run_kernel.list_runs",
+                side_effect=AssertionError(
+                    "projection must not derive work via list_runs"
+                ),
+            ), patch(
+                "agentflow.work_graph.completed_work_item_ids",
+                side_effect=AssertionError(
+                    "projection must not call completed_work_item_ids"
+                ),
+            ):
+                projection = build_projection(
+                    data_dir=data_dir, repository=repository
+                )
+
+            self.assertEqual(
+                {entry["run_id"] for entry in projection["runs"]},
+                {"run-alpha", "run-damaged"},
+            )
+            self.assertEqual(projection["work"]["completed_ids"], ["alpha"])
+            self.assertEqual(
+                [item["id"] for item in projection["work"]["ready"]],
+                ["beta"],
+            )
+            self.assertEqual(
+                [item["id"] for item in projection["work"]["items"]],
+                ["alpha", "beta"],
+            )
+
+    def test_events_after_corruption_do_not_affect_state_or_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repository = temp_path / "target"
+            data_dir = temp_path / "home"
+            init_repository(repository)
+            save_work_graph(
+                [
+                    {
+                        "id": "alpha",
+                        "summary": "First",
+                        "acceptance_criteria": ["a"],
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "beta",
+                        "summary": "Second",
+                        "acceptance_criteria": ["b"],
+                        "depends_on": ["alpha"],
+                    },
+                ],
+                repository,
+            )
+
+            run_dir = data_dir / "runs" / "run-truncated"
+            created = {
+                "run_id": "run-truncated",
+                "sequence": 1,
+                "type": "run_created",
+            }
+            # Approval appears only after damage and must not count.
+            payload = (
+                (json.dumps(created) + "\n").encode("utf-8")
+                + b"{not-json\n"
+                + (
+                    json.dumps(
+                        {
+                            "run_id": "run-truncated",
+                            "sequence": 3,
+                            "type": "human_approved",
+                            "approved_sha": "should-not-apply",
+                        }
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            write_events(run_dir, payload)
+            (run_dir / "task.json").write_text(
+                json.dumps(
+                    {
+                        "summary": "Truncated",
+                        "source": {
+                            "provider": "work-graph",
+                            "work_item_id": "alpha",
+                            "content_hash": "hash",
+                            "captured_at": "2026-07-16T00:00:00+00:00",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "repository.json").write_text(
+                json.dumps(
+                    {"repository": str(repository), "base_sha": "base"}
+                ),
+                encoding="utf-8",
+            )
+
+            projection = build_projection(
+                data_dir=data_dir, repository=repository
+            )
+            run_entry = projection["runs"][0]
+            self.assertEqual(run_entry["state"], "created")
+            self.assertNotIn("approved_sha", run_entry)
+            self.assertTrue(run_entry["evidence_truncated"])
+            self.assertEqual(projection["work"]["completed_ids"], [])
+            self.assertEqual(
+                [item["id"] for item in projection["work"]["ready"]],
+                ["alpha"],
+            )
+            evidence = projection["evidence"][0]
+            self.assertTrue(evidence["truncated"])
+            self.assertEqual(evidence["events"], [created])
+
+    def test_non_object_json_line_stops_reading_like_invalid_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            path = temp_path / "events.jsonl"
+            good = {"run_id": "run-x", "sequence": 1, "type": "run_created"}
+            path.write_text(
+                json.dumps(good)
+                + "\n[1, 2]\n"
+                + json.dumps(
+                    {"run_id": "run-x", "sequence": 3, "type": "build_ready"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            events, truncated = read_events_tolerant(path)
+            self.assertTrue(truncated)
+            self.assertEqual(events, [good])
 
 
 if __name__ == "__main__":
